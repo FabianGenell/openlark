@@ -15,16 +15,11 @@ LAUNCH_AGENT_DIR="$HOME/Library/LaunchAgents"
 LAUNCH_AGENT_PATH="$LAUNCH_AGENT_DIR/app.openlark.sidecar.plist"
 LOG_DIR="$HOME/Library/Logs/OpenLark"
 
-for cmd in uv ffmpeg; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "✗ '$cmd' is not installed. Install with:"
-        case "$cmd" in
-            uv) echo "    curl -LsSf https://astral.sh/uv/install.sh | sh" ;;
-            ffmpeg) echo "    brew install ffmpeg" ;;
-        esac
-        exit 1
-    fi
-done
+if ! command -v uv >/dev/null 2>&1; then
+    echo "✗ 'uv' is not installed. Install with:"
+    echo "    curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
 
 echo "› creating sidecar venv..."
 cd "$SIDECAR_DIR"

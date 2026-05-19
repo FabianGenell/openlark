@@ -56,8 +56,19 @@ final class OverlayWindowController {
             defer: false
         )
         panel.isFloatingPanel = true
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        // .screenSaver sits above fullscreen apps and the menu bar, so the
+        // overlay is never hidden behind another window.
+        panel.level = .screenSaver
+        // moveToActiveSpace makes the overlay follow the user to whichever
+        // Space they're currently on, instead of being stranded on the one
+        // where they originally triggered it.
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .moveToActiveSpace,
+            .stationary,
+            .ignoresCycle,
+            .fullScreenAuxiliary,
+        ]
         panel.hasShadow = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
@@ -91,13 +102,14 @@ final class OverlayWindowController {
     }
 
     private func positionWindow(_ window: NSWindow) {
-        if let saved = loadSavedOrigin(), pointIsOnVisibleScreen(saved, windowSize: window.frame.size) {
+        let size = window.frame.size
+        if let saved = loadSavedOrigin(),
+           let _ = screenFullyContaining(NSRect(origin: saved, size: size)) {
             window.setFrameOrigin(saved)
             return
         }
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let size = window.frame.size
         let x = visible.midX - size.width / 2
         let y = visible.minY + 24
         window.setFrameOrigin(NSPoint(x: x, y: y))
@@ -121,9 +133,12 @@ final class OverlayWindowController {
         return NSPoint(x: x, y: y)
     }
 
-    private func pointIsOnVisibleScreen(_ origin: NSPoint, windowSize: NSSize) -> Bool {
-        let rect = NSRect(origin: origin, size: windowSize)
-        return NSScreen.screens.contains { $0.frame.intersects(rect) }
+    /// Returns the screen whose `visibleFrame` fully contains the given rect,
+    /// if any. Stricter than `intersects` — a saved origin from a now-disconnected
+    /// display can technically intersect a remaining screen while being mostly
+    /// off-screen, which is what caused the v0.2.0 "overlay never appears" bug.
+    private func screenFullyContaining(_ rect: NSRect) -> NSScreen? {
+        NSScreen.screens.first { $0.visibleFrame.contains(rect) }
     }
 }
 
