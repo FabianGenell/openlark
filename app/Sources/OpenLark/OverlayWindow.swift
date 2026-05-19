@@ -29,7 +29,7 @@ final class OverlayWindowController {
     }
 
     func setProcessing() {
-        model.isProcessing = true
+        model.beginProcessing()
     }
 
     func hide() {
@@ -157,14 +157,33 @@ final class OverlayModel: ObservableObject {
     var levelProvider: (() -> Float)?
 
     private var timer: Timer?
+    private var processingPhase: Double = 0
 
     func start() {
+        isProcessing = false
         levels = Array(repeating: 0, count: levels.count)
+        startRecordingTimer()
+    }
+
+    /// Switch to the "Transcribing…" state. Stops sampling the (now-stale) mic
+    /// level and replaces it with a synthetic scanning animation so the user
+    /// can clearly see that we're processing, not still listening.
+    func beginProcessing() {
+        isProcessing = true
+        processingPhase = 0
+        startProcessingTimer()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func startRecordingTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             let v = self.levelProvider?() ?? 0
-            // shift left, append new sample
             var next = self.levels
             next.removeFirst()
             // amplify and clip — RMS is normally < 0.3, scale up so quiet speech still moves
@@ -174,8 +193,22 @@ final class OverlayModel: ObservableObject {
         }
     }
 
-    func stop() {
+    private func startProcessingTimer() {
         timer?.invalidate()
-        timer = nil
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.processingPhase += 0.14
+            let count = self.levels.count
+            var next = [Float](repeating: 0, count: count)
+            // Two travelling sine waves crossed — gives a gentle "thinking" pulse.
+            for i in 0..<count {
+                let pos = Double(i) / Double(max(1, count - 1))
+                let wave = sin(self.processingPhase + pos * .pi * 2.6)
+                let envelope = 0.5 + 0.5 * sin(self.processingPhase * 0.4)
+                let v = 0.20 + 0.18 * (wave + 1) / 2 * envelope
+                next[i] = Float(v)
+            }
+            self.levels = next
+        }
     }
 }

@@ -62,7 +62,10 @@ actor SidecarClient {
         let respHeader = try recvExact(fd: fd, count: 4)
         let respLen = respHeader.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
         let body = try recvExact(fd: fd, count: Int(respLen))
-        return String(data: body, encoding: .utf8) ?? ""
+        guard let text = String(data: body, encoding: .utf8) else {
+            throw SidecarError.serverError("malformed UTF-8 in sidecar response")
+        }
+        return text
     }
 
     private func sendAll(fd: Int32, data: Data) throws {

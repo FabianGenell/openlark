@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let history = HistoryStore.shared
     private let injector = TextInjector()
     private var recordingStartedAt: Date?
+    private var recordingFrontmostApp: String?
     private var localEscMonitor: Any?
 
     enum State { case idle, recording, transcribing }
@@ -88,17 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "h"
         ))
         menu.addItem(NSMenuItem(
-            title: "Vocabulary…",
+            title: "Settings…",
             action: #selector(openSettings),
             keyEquivalent: ","
         ))
-        let loginItem = NSMenuItem(
-            title: "Launch at Login",
-            action: #selector(toggleLaunchAtLogin),
-            keyEquivalent: ""
-        )
-        loginItem.state = isLaunchAtLoginEnabled() ? .on : .off
-        menu.addItem(loginItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit OpenLark",
@@ -110,28 +104,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuToggleRecording() {
         toggleRecording()
-    }
-
-    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
-        let service = SMAppService.mainApp
-        do {
-            if service.status == .enabled {
-                try service.unregister()
-                sender.state = .off
-                AppLogger.log("launch-at-login disabled")
-            } else {
-                try service.register()
-                sender.state = .on
-                AppLogger.log("launch-at-login enabled")
-            }
-        } catch {
-            AppLogger.log("toggleLaunchAtLogin failed: \(error)")
-            NSSound.beep()
-        }
-    }
-
-    private func isLaunchAtLoginEnabled() -> Bool {
-        SMAppService.mainApp.status == .enabled
     }
 
     @objc private func openHistory() {
@@ -199,6 +171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppLogger.log("recorder failed: \(error)")
             return
         }
+        // Capture the frontmost app NOW, before our overlay or any focus shift.
+        // Used for the "Apps used this week" stat.
+        recordingFrontmostApp = NSWorkspace.shared.frontmostApplication?.localizedName
         state = .recording
         recordingStartedAt = Date()
         overlayController.show()
@@ -218,27 +193,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AppLogger.log("stopAndTranscribe: \(wav.count) bytes captured, sending to sidecar")
 
-        Task.detached { [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             let result = await self.sidecar.transcribe(wav: wav)
-            await MainActor.run {
-                self.overlayController.hide()
-                switch result {
-                case .success(let raw):
-                    let corrected = self.vocab.correct(raw)
-                    AppLogger.log("transcribed: \(raw.count) chars raw, \(corrected.count) chars corrected")
-                    if !corrected.isEmpty {
-                        let duration = self.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-                        self.history.add(text: corrected, durationSeconds: duration)
-                        self.injector.inject(text: corrected)
-                    }
-                case .failure(let err):
-                    AppLogger.log("transcription failed: \(err)")
-                    NSSound.beep()
+            self.overlayController.hide()
+            switch result {
+            case .success(let raw):
+                let corrected = self.vocab.correct(raw)
+                AppLogger.log("transcribed: \(raw.count) chars raw, \(corrected.count) chars corrected")
+                if !corrected.isEmpty {
+                    let duration = self.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                    self.history.add(
+                        text: corrected,
+                        durationSeconds: duration,
+                        appName: self.recordingFrontmostApp
+                    )
+                    self.injector.inject(text: corrected)
                 }
-                self.recordingStartedAt = nil
-                self.state = .idle
+            case .failure(let err):
+                AppLogger.log("transcription failed: \(err)")
+                NSSound.beep()
             }
+            self.recordingStartedAt = nil
+            self.recordingFrontmostApp = nil
+            self.state = .idle
         }
     }
 

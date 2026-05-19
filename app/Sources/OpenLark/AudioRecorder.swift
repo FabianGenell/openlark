@@ -110,8 +110,10 @@ final class AudioRecorder: NSObject {
             AppLogger.log("resampled \(buffer.count) → \(outSamples.count) samples")
         }
         let wav = WAVEncoder.encode(samples: outSamples, sampleRate: 16_000)
+        #if DEBUG
         try? wav.write(to: URL(fileURLWithPath: "/tmp/openlark-last.wav"))
         AppLogger.log("debug WAV written to /tmp/openlark-last.wav (\(wav.count) bytes)")
+        #endif
         return wav
     }
 

@@ -39,7 +39,9 @@ openssl pkcs12 -export -inkey "$KEY" -in "$CERT" \
     -out "$P12" -passout pass:t \
     -legacy -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 2>/dev/null
 
-security import "$P12" -k "$KEYCHAIN" -P t -T /usr/bin/codesign -A 2>&1 | grep -v "MAC" || true
+# Pre-authorise codesign (no -A so we don't open the key to every app on the
+# machine). The user may see one keychain prompt the first time codesign uses it.
+security import "$P12" -k "$KEYCHAIN" -P t -T /usr/bin/codesign 2>&1 | grep -v "MAC" || true
 
 # Mark the cert as trusted for codesigning at the user level (no sudo needed).
 # Without this step, `security find-identity -p codesigning` skips the cert

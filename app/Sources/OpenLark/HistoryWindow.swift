@@ -5,7 +5,7 @@ enum HistoryWindowFactory {
     @MainActor
     static func make(injector: TextInjector) -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 720),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -36,6 +36,11 @@ struct HistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            StatsCard(stats: store.stats())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+
             header
 
             Divider().opacity(0.15)
@@ -61,7 +66,7 @@ struct HistoryView: View {
                 }
             }
         }
-        .frame(minWidth: 480, minHeight: 480)
+        .frame(minWidth: 560, minHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 

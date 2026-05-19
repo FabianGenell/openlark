@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-SOCK = "/tmp/transcribe.sock"
+SOCK = "/tmp/openlark.sock"
 HEADER = struct.Struct(">I")
 
 

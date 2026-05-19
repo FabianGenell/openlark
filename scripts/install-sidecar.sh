@@ -27,11 +27,13 @@ for cmd in uv ffmpeg; do
 done
 
 echo "› creating sidecar venv..."
-if [ ! -d "$SIDECAR_DIR/.venv" ]; then
-    cd "$SIDECAR_DIR"
+cd "$SIDECAR_DIR"
+if [ ! -d ".venv" ]; then
     uv venv --python 3.13
-    uv pip install parakeet-mlx numpy
 fi
+# Always (re-)install so users pulling a new repo version get matching deps.
+uv pip install --upgrade -r <(uv pip compile pyproject.toml 2>/dev/null) 2>/dev/null \
+    || uv pip install --upgrade "parakeet-mlx>=0.3.5,<0.4" "numpy>=2.0" "mlx>=0.18"
 
 PYTHON_BIN="$SIDECAR_DIR/.venv/bin/python"
 if [ ! -x "$PYTHON_BIN" ]; then

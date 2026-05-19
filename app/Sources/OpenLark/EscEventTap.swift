@@ -14,9 +14,9 @@ final class EscEventTap: @unchecked Sendable {
     func enable(onEsc: @escaping @Sendable () -> Void) {
         lock.lock()
         self.onEsc = onEsc
+        let alreadyActive = tap != nil
         lock.unlock()
-
-        if tap != nil { return }
+        if alreadyActive { return }
 
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -40,26 +40,45 @@ final class EscEventTap: @unchecked Sendable {
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, newTap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: newTap, enable: true)
-        tap = newTap
-        runLoopSource = source
+
+        lock.lock()
+        // Re-check inside lock to avoid double-create on concurrent enable.
+        if self.tap == nil {
+            self.tap = newTap
+            self.runLoopSource = source
+            lock.unlock()
+        } else {
+            // Lost the race — tear down the duplicate we just built.
+            lock.unlock()
+            CGEvent.tapEnable(tap: newTap, enable: false)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            CFMachPortInvalidate(newTap)
+        }
     }
 
     func disable() {
+        lock.lock()
+        let tap = self.tap
+        let source = self.runLoopSource
+        self.tap = nil
+        self.runLoopSource = nil
+        self.onEsc = nil
+        lock.unlock()
+
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
         }
-        if let source = runLoopSource {
+        if let source {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
         }
-        tap = nil
-        runLoopSource = nil
-        lock.lock()
-        onEsc = nil
-        lock.unlock()
     }
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            lock.lock()
+            let tap = self.tap
+            lock.unlock()
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
