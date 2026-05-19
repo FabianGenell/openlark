@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Pillow (icon generation)
+        run: pip install Pillow
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build
+        run: ./scripts/build.sh
+
+      - name: Zip the app
+        run: |
+          cd build
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent OpenLark.app OpenLark.app.zip
+          ls -la
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF#refs/tags/}" == v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLark-${{ steps.ver.outputs.version }}
+          path: build/OpenLark.app.zip
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/OpenLark.app.zip
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            1. Download `OpenLark.app.zip` below and unzip it.
+            2. Drag `OpenLark.app` to `~/Applications`.
+            3. Install prerequisites:
+               ```
+               brew install ffmpeg
+               curl -LsSf https://astral.sh/uv/install.sh | sh
+               ```
+            4. Set up the inference daemon (one-time, downloads the ~600 MB model):
+               ```
+               git clone https://github.com/${{ github.repository }}.git
+               cd openlark
+               ./scripts/install-sidecar.sh
+               ```
+            5. Right-click `OpenLark.app` → **Open** (first launch only — Gatekeeper).
+            6. Grant **Microphone**, **Accessibility** and **Input Monitoring** in System Settings → Privacy & Security.
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for details.

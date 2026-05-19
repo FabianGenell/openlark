@@ -1,0 +1,24 @@
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+Package.resolved
+
+# Build artifacts
+build/
+*.app/
+*.icns
+*.iconset/
+
+# Python sidecar
+sidecar/.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Logs / debug
+*.log
+/tmp/
