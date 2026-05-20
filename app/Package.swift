@@ -16,7 +16,12 @@ let package = Package(
             dependencies: [
                 .product(name: "KeyboardShortcuts", package: "KeyboardShortcuts"),
             ],
-            path: "Sources/OpenLark"
+            path: "Sources/OpenLark",
+            // Swift 5 language mode — keeps Swift 6 toolchain features but
+            // disables the strict-concurrency errors that fire inconsistently
+            // between Xcode 16.0 (CI) and newer toolchains. Revisit when the
+            // codebase has been audited for Sendable end-to-end.
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]
 )
