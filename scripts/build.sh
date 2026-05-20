@@ -33,11 +33,12 @@ PYTHON_BIN="$(command -v python3)"
 cp "$OUT_DIR/OpenLark.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 echo "› codesigning…"
-# Prefer a stable self-signed identity (created once by setup-signing-identity.sh)
-# so macOS TCC keeps mic/accessibility/input-monitoring grants across rebuilds.
-# Falls back to ad-hoc if the identity isn't installed yet.
-IDENTITY_NAME="OpenLark Dev"
+# Identity priority:
+#   1. $SIGNING_IDENTITY env var (used by CI — "OpenLark Release")
+#   2. local "OpenLark Dev" cert (created by setup-signing-identity.sh)
+#   3. ad-hoc, with a warning
 ENTITLEMENTS="$APP_DIR/Resources/OpenLark.entitlements"
+IDENTITY_NAME="${SIGNING_IDENTITY:-OpenLark Dev}"
 if security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
     echo "  using identity: $IDENTITY_NAME"
     codesign --force --deep --options runtime \

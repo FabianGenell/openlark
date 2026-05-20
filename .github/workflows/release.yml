@@ -29,7 +29,43 @@ jobs:
       - name: Show Swift version
         run: swift --version
 
+      - name: Import release signing identity
+        env:
+          P12_BASE64: ${{ secrets.RELEASE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.RELEASE_P12_PASSWORD }}
+        run: |
+          # Decode the .p12 into a temp file
+          P12_PATH="$RUNNER_TEMP/release.p12"
+          echo "$P12_BASE64" | base64 --decode > "$P12_PATH"
+
+          # Create an ephemeral keychain for this build
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Make it the default search keychain so `security find-identity` finds it
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          # Import the .p12 and authorise codesign to use it without a UI prompt
+          security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -A
+
+          # Trust the cert for codesigning (user-level — no sudo needed)
+          security find-certificate -c "OpenLark Release" -p "$KEYCHAIN_PATH" > "$RUNNER_TEMP/cert.pem"
+          security add-trusted-cert -p codeSign -k "$KEYCHAIN_PATH" "$RUNNER_TEMP/cert.pem" || true
+
+          # Allow codesign to use the key without prompting
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+
+          security find-identity -p codesigning -v "$KEYCHAIN_PATH"
+          rm -f "$P12_PATH"
+
       - name: Build
+        env:
+          SIGNING_IDENTITY: "OpenLark Release"
         run: ./scripts/build.sh
 
       - name: Zip the app + compute checksum
@@ -71,9 +107,8 @@ jobs:
 
             1. Download `OpenLark.app.zip` below and unzip it.
             2. Drag `OpenLark.app` to `~/Applications`.
-            3. Install prerequisites:
+            3. Install [`uv`](https://github.com/astral-sh/uv) if you don't already have it:
                ```
-               brew install ffmpeg
                curl -LsSf https://astral.sh/uv/install.sh | sh
                ```
             4. Set up the inference daemon (one-time, downloads the ~600 MB model):

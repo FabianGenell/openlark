@@ -17,10 +17,23 @@ final class OverlayWindowController {
     func show() {
         model.isProcessing = false
         ensureWindow()
-        guard let window else { return }
+        guard let window else {
+            AppLogger.log("overlay show: window nil after ensureWindow — fatal")
+            return
+        }
+        // Re-assert level + collection behavior on each show. Some apps (Loom,
+        // screen recorders) can demote our window when they grab the mic.
+        window.level = .screenSaver
+        window.collectionBehavior = [
+            .canJoinAllSpaces,
+            .ignoresCycle,
+            .fullScreenAuxiliary,
+        ]
         positionWindow(window)
         window.alphaValue = 0
         window.orderFrontRegardless()
+        let screenInfo = NSScreen.main.map { "\($0.frame)" } ?? "nil"
+        AppLogger.log("overlay show: frame=\(window.frame) mainScreen=\(screenInfo) visible=\(window.isVisible) onActiveSpace=\(window.isOnActiveSpace)")
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
             window.animator().alphaValue = 1
@@ -59,13 +72,12 @@ final class OverlayWindowController {
         // .screenSaver sits above fullscreen apps and the menu bar, so the
         // overlay is never hidden behind another window.
         panel.level = .screenSaver
-        // moveToActiveSpace makes the overlay follow the user to whichever
-        // Space they're currently on, instead of being stranded on the one
-        // where they originally triggered it.
+        // .canJoinAllSpaces is enough to make the panel appear on every Space
+        // the user switches to. .moveToActiveSpace + .stationary contradict it
+        // and cause macOS to silently pick one — usually leaving the overlay
+        // stranded on the Space where it was first shown.
         panel.collectionBehavior = [
             .canJoinAllSpaces,
-            .moveToActiveSpace,
-            .stationary,
             .ignoresCycle,
             .fullScreenAuxiliary,
         ]

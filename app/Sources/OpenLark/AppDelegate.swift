@@ -25,6 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordingStartedAt: Date?
     private var recordingFrontmostApp: String?
     private var localEscMonitor: Any?
+    private var maxDurationTimer: Timer?
+
+    /// Auto-stop recordings at this length. Above this we hit array-realloc
+    /// stalls on the capture queue and the WAV header eventually overflows.
+    private static let maxRecordingSeconds: TimeInterval = 10 * 60
 
     enum State { case idle, recording, transcribing }
     private var state: State = .idle
@@ -178,11 +183,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingStartedAt = Date()
         overlayController.show()
         installEscMonitor()
+        installMaxDurationTimer()
+    }
+
+    private func installMaxDurationTimer() {
+        maxDurationTimer?.invalidate()
+        maxDurationTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.maxRecordingSeconds,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.state == .recording else { return }
+                AppLogger.log("hit max recording duration (\(Int(Self.maxRecordingSeconds))s) — auto-stopping")
+                self.stopAndTranscribe()
+            }
+        }
+    }
+
+    private func removeMaxDurationTimer() {
+        maxDurationTimer?.invalidate()
+        maxDurationTimer = nil
     }
 
     private func stopAndTranscribe() {
         guard state == .recording else { return }
         removeEscMonitor()
+        removeMaxDurationTimer()
         state = .transcribing
         overlayController.setProcessing()
 
@@ -222,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func cancel() {
         removeEscMonitor()
+        removeMaxDurationTimer()
         recorder.cancel()
         overlayController.hide()
         state = .idle

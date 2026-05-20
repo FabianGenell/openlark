@@ -101,6 +101,12 @@ final class AudioRecorder: NSObject {
         let nonZeroPct = Double(nonZero) / Double(buffer.count) * 100
         AppLogger.log(String(format: "audio stats: peak=%d (%.1f dBFS) rms=%.4f (%.1f dBFS) nonZero=%.1f%%",
                              peak, peakDb, rms, rmsDb, nonZeroPct))
+        // Flag silent capture loudly. Real speech is normally peak > -25 dBFS.
+        // Anything quieter usually means another app left the BT headset's HFP
+        // route in a half-broken state, or the user spoke too softly.
+        if peakDb < -45 {
+            AppLogger.log("⚠ near-silent capture (peak \(String(format: "%.1f", peakDb)) dBFS) — try the built-in mic in System Settings → Sound → Input, or reconnect your Bluetooth headset")
+        }
 
         let outSamples: [Int16]
         if abs(sourceSampleRate - 16_000) < 1 || sourceSampleRate == 0 {
