@@ -31,29 +31,30 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
 
 1. Download the latest `OpenLark.app.zip` from [Releases](../../releases) and unzip.
 2. Drag `OpenLark.app` to `~/Applications`.
-3. Install `uv` if you don't already have it:
+3. Right-click `OpenLark.app` → **Open** the first time (Gatekeeper warning — this is an unsigned app), or run:
    ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
+   xattr -dr com.apple.quarantine ~/Applications/OpenLark.app
    ```
-4. Set up the inference daemon (one-time, downloads the ~600 MB model):
-   ```bash
-   git clone https://github.com/FabianGenell/openlark.git
-   cd openlark
-   ./scripts/install-sidecar.sh
-   ```
-5. Open OpenLark from `~/Applications`. macOS will warn it's from an unidentified developer — right-click → **Open** the first time, or run `xattr -dr com.apple.quarantine ~/Applications/OpenLark.app`.
-6. Grant **Microphone**, **Accessibility** and **Input Monitoring** in System Settings → Privacy & Security when prompted.
+4. The app walks you through:
+   - Granting **Microphone**, **Accessibility** and **Input Monitoring** permissions
+   - Downloading the speech engine (one-time, ~180 MB — embedded Python + Parakeet MLX libraries)
+   - Background daemon registration
+5. Press your hotkey (default `⌘+↑`) and dictate.
+
+That's it — no `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~600 MB Parakeet model from HuggingFace (~3 min on typical broadband).
 
 ### From source
 
 ```bash
 git clone https://github.com/FabianGenell/openlark
 cd openlark
-curl -LsSf https://astral.sh/uv/install.sh | sh
 ./scripts/setup-signing-identity.sh   # one-time: local code-signing identity for sticky TCC permissions
-./scripts/install.sh                   # builds OpenLark.app + sets up the daemon
-open ~/Applications/OpenLark.app
+./scripts/build.sh                     # builds build/OpenLark.app
+cp -R build/OpenLark.app ~/Applications/
+open ~/Applications/OpenLark.app       # runs the same first-launch installer as the release
 ```
+
+For developing the sidecar without going through the embedded installer flow, `./scripts/install-sidecar.sh` is still around as a fallback (requires `uv`).
 
 ## Usage
 

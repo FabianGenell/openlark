@@ -1,4 +1,5 @@
 import AppKit
+import KeyboardShortcuts
 import ServiceManagement
 import SwiftUI
 
@@ -111,6 +112,7 @@ struct SettingsRoot: View {
 private struct GeneralSettingsPane: View {
     @ObservedObject private var history = HistoryStore.shared
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @AppStorage("pushToTalkMode") private var pushToTalkMode: Bool = false
 
     var body: some View {
         SettingsScroll {
@@ -140,25 +142,22 @@ private struct GeneralSettingsPane: View {
                 HStack {
                     Text("Toggle recording")
                     Spacer()
-                    HStack(spacing: 4) {
-                        keyCap("command")
-                        keyCap("arrow.up")
-                    }
+                    KeyboardShortcuts.Recorder(for: .toggleRecording)
                 }
-                Text("Hotkey customization is coming in a future release.")
+                Text("Tap the field, then press the keys you want. Pick a combination that doesn't clash with apps you use — modifier + arrow / letter works well.")
+                    .settingsHint()
+
+                HStack {
+                    Text("Push-to-talk mode")
+                    Spacer()
+                    Toggle("", isOn: $pushToTalkMode)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                }
+                Text("On: hold the hotkey to record, release to transcribe. Off (default): tap once to start, tap again to stop.")
                     .settingsHint()
             }
         }
-    }
-
-    private func keyCap(_ symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: 11, weight: .semibold))
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill(Color.white.opacity(0.10))
-            )
     }
 }
 

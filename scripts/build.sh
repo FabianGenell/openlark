@@ -32,6 +32,13 @@ PYTHON_BIN="$(command -v python3)"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/make_icon.py" > /dev/null
 cp "$OUT_DIR/OpenLark.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
+# Bundle the Python sidecar entrypoint inside the .app. The Swift installer
+# copies this out to ~/Library/Application Support/OpenLark/sidecar/ on first
+# launch and points launchd at the copy.
+echo "› bundling sidecar/server.py…"
+mkdir -p "$APP_BUNDLE/Contents/Resources/sidecar"
+cp "$ROOT_DIR/sidecar/server.py" "$APP_BUNDLE/Contents/Resources/sidecar/server.py"
+
 echo "› codesigning…"
 # Identity priority:
 #   1. $SIGNING_IDENTITY env var (used by CI — "OpenLark Release")

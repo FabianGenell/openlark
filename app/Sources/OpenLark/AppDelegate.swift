@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayController: OverlayWindowController!
     private var settingsWindow: NSWindow?
     private var historyWindow: NSWindow?
+    private var onboardingWindow: NSWindow?
+    private static let onboardingSeenKey = "onboardingSeen"
     private let recorder = AudioRecorder()
     private let sidecar = SidecarClient()
     private let vocab = VocabStore.shared
@@ -67,9 +69,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         KeyboardShortcuts.onKeyDown(for: .toggleRecording) { [weak self] in
-            AppLogger.log("hotkey toggleRecording fired")
-            self?.toggleRecording()
+            guard let self else { return }
+            if self.isPushToTalkMode {
+                // Hold-to-talk: start on key down, stop on key up.
+                if self.state == .idle {
+                    AppLogger.log("PTT down — start")
+                    self.startRecording()
+                }
+            } else {
+                AppLogger.log("hotkey toggleRecording fired")
+                self.toggleRecording()
+            }
         }
+
+        KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
+            guard let self, self.isPushToTalkMode else { return }
+            if self.state == .recording {
+                AppLogger.log("PTT up — stop")
+                self.stopAndTranscribe()
+            }
+        }
+
+        // First-launch onboarding — only show once per install.
+        if !UserDefaults.standard.bool(forKey: Self.onboardingSeenKey) {
+            DispatchQueue.main.async { [weak self] in
+                self?.showOnboarding()
+            }
+        }
+    }
+
+    private func showOnboarding() {
+        if let w = onboardingWindow {
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = OnboardingWindowFactory.make { [weak self] in
+            UserDefaults.standard.set(true, forKey: Self.onboardingSeenKey)
+            self?.onboardingWindow = nil
+        }
+        onboardingWindow = window
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.onboardingWindow = nil
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private var isPushToTalkMode: Bool {
+        UserDefaults.standard.bool(forKey: "pushToTalkMode")
     }
 
     private func setupMenuBar() {
