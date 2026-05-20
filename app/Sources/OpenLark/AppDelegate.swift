@@ -1,5 +1,5 @@
 import AppKit
-import AVFoundation
+@preconcurrency import AVFoundation
 import KeyboardShortcuts
 import ServiceManagement
 import SwiftUI
