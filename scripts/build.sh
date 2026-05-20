@@ -37,9 +37,18 @@ echo "› codesigning…"
 #   1. $SIGNING_IDENTITY env var (used by CI — "OpenLark Release")
 #   2. local "OpenLark Dev" cert (created by setup-signing-identity.sh)
 #   3. ad-hoc, with a warning
+#
+# In CI we use `find-identity -v` (no `-p codesigning` policy filter) because
+# the runner-imported cert isn't marked as trusted for codesigning (that step
+# would require an interactive UI prompt the runner can't satisfy). codesign
+# itself happily signs with an untrusted cert.
 ENTITLEMENTS="$APP_DIR/Resources/OpenLark.entitlements"
 IDENTITY_NAME="${SIGNING_IDENTITY:-OpenLark Dev}"
-if security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
+FIND_FLAGS=("-v")
+if [ -z "${SIGNING_IDENTITY:-}" ]; then
+    FIND_FLAGS=("-p" "codesigning" "-v")
+fi
+if security find-identity "${FIND_FLAGS[@]}" 2>/dev/null | grep -q "$IDENTITY_NAME"; then
     echo "  using identity: $IDENTITY_NAME"
     codesign --force --deep --options runtime \
         --entitlements "$ENTITLEMENTS" \

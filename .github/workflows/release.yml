@@ -48,19 +48,20 @@ jobs:
           # Make it the default search keychain so `security find-identity` finds it
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
-          # Import the .p12 and authorise codesign to use it without a UI prompt
+          # Import the .p12 and authorise codesign to use it without a UI prompt.
+          # We do NOT call `security add-trusted-cert` — it can hang on a
+          # non-interactive runner waiting for an admin auth prompt. codesign
+          # doesn't actually need the cert to be trust-policy-listed; the
+          # build.sh script falls back to `find-identity -v` (no policy filter)
+          # when SIGNING_IDENTITY is set, which finds untrusted identities too.
           security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" \
             -T /usr/bin/codesign -A
-
-          # Trust the cert for codesigning (user-level — no sudo needed)
-          security find-certificate -c "OpenLark Release" -p "$KEYCHAIN_PATH" > "$RUNNER_TEMP/cert.pem"
-          security add-trusted-cert -p codeSign -k "$KEYCHAIN_PATH" "$RUNNER_TEMP/cert.pem" || true
 
           # Allow codesign to use the key without prompting
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
 
-          security find-identity -p codesigning -v "$KEYCHAIN_PATH"
+          security find-identity -v "$KEYCHAIN_PATH"
           rm -f "$P12_PATH"
 
       - name: Build
