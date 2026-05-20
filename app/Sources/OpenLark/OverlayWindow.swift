@@ -208,34 +208,39 @@ final class OverlayModel: ObservableObject {
 
     private func startRecordingTimer() {
         timer?.invalidate()
+        // Timer callbacks fire on the main run loop, which is the main actor —
+        // assumeIsolated is safe here and avoids a Task hop per frame.
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let v = self.levelProvider?() ?? 0
-            var next = self.levels
-            next.removeFirst()
-            // amplify and clip — RMS is normally < 0.3, scale up so quiet speech still moves
-            let amped = min(1.0, sqrt(max(0, v)) * 1.8)
-            next.append(amped)
-            self.levels = next
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let v = self.levelProvider?() ?? 0
+                var next = self.levels
+                next.removeFirst()
+                let amped = min(1.0, sqrt(max(0, v)) * 1.8)
+                next.append(amped)
+                self.levels = next
+            }
         }
     }
 
     private func startProcessingTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.processingPhase += 0.14
-            let count = self.levels.count
-            var next = [Float](repeating: 0, count: count)
-            // Two travelling sine waves crossed — gives a gentle "thinking" pulse.
-            for i in 0..<count {
-                let pos = Double(i) / Double(max(1, count - 1))
-                let wave = sin(self.processingPhase + pos * .pi * 2.6)
-                let envelope = 0.5 + 0.5 * sin(self.processingPhase * 0.4)
-                let v = 0.20 + 0.18 * (wave + 1) / 2 * envelope
-                next[i] = Float(v)
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.processingPhase += 0.14
+                let count = self.levels.count
+                var next = [Float](repeating: 0, count: count)
+                // Two travelling sine waves crossed — gentle "thinking" pulse.
+                for i in 0..<count {
+                    let pos = Double(i) / Double(max(1, count - 1))
+                    let wave = sin(self.processingPhase + pos * .pi * 2.6)
+                    let envelope = 0.5 + 0.5 * sin(self.processingPhase * 0.4)
+                    let v = 0.20 + 0.18 * (wave + 1) / 2 * envelope
+                    next[i] = Float(v)
+                }
+                self.levels = next
             }
-            self.levels = next
         }
     }
 }
