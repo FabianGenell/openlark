@@ -1,11 +1,28 @@
 #!/usr/bin/env bash
+###############################################################################
+#  ⚠  DO NOT RE-RUN THIS SCRIPT  ⚠
+#
+#  The PKCS12 it produced is the load-bearing root of trust for every
+#  OpenLark user's macOS TCC permissions (Microphone / Accessibility /
+#  Input Monitoring). Re-running creates a NEW cert with a NEW SHA-1,
+#  which invalidates every existing user's permission grant on their
+#  next update.
+#
+#  If you genuinely need to re-issue:
+#    1. Confirm the existing GitHub secrets (RELEASE_P12_BASE64 +
+#       RELEASE_P12_PASSWORD) are TRULY lost / unrecoverable.
+#    2. Communicate in release notes that this version requires re-granting.
+#    3. Back up the new .p12 + password to offline storage (1Password)
+#       BEFORE deleting this temp dir.
+###############################################################################
+#
 # Generates a stable self-signed code-signing identity for the CI release
 # workflow. Output: base64-encoded PKCS12 + password — paste these into
 # the repo's GitHub Actions secrets as RELEASE_P12_BASE64 and RELEASE_P12_PASSWORD.
 #
-# Run this ONCE. The CI workflow will import the .p12 on every build, so
-# every released OpenLark.app.zip has the same code-directory hash. macOS TCC
-# keeps mic / accessibility / input-monitoring grants across version updates.
+# The CI workflow imports the .p12 on every build, so every released
+# OpenLark.app.zip has the same identity SHA-1. macOS TCC keeps mic /
+# accessibility / input-monitoring grants across version updates.
 #
 # This identity is separate from the local "OpenLark Dev" cert created by
 # scripts/setup-signing-identity.sh — the dev cert is per-machine; this one

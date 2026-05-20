@@ -112,7 +112,6 @@ struct SettingsRoot: View {
 private struct GeneralSettingsPane: View {
     @ObservedObject private var history = HistoryStore.shared
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
-    @AppStorage("pushToTalkMode") private var pushToTalkMode: Bool = false
 
     var body: some View {
         SettingsScroll {
@@ -145,16 +144,6 @@ private struct GeneralSettingsPane: View {
                     KeyboardShortcuts.Recorder(for: .toggleRecording)
                 }
                 Text("Tap the field, then press the keys you want. Pick a combination that doesn't clash with apps you use — modifier + arrow / letter works well.")
-                    .settingsHint()
-
-                HStack {
-                    Text("Push-to-talk mode")
-                    Spacer()
-                    Toggle("", isOn: $pushToTalkMode)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                }
-                Text("On: hold the hotkey to record, release to transcribe. Off (default): tap once to start, tap again to stop.")
                     .settingsHint()
             }
         }

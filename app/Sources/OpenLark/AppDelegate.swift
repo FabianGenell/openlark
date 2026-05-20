@@ -52,15 +52,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AppLogger.log("launch-at-login status: \(service.status.rawValue)")
 
-        // Trigger the mic permission prompt early so the first ⌘+↑ works cleanly
-        // instead of failing silently with no input.
+        // Don't fire the mic permission prompt here — it would appear before
+        // the welcome window, out of context. Onboarding's PermissionsStep
+        // requests it as part of the flow. AudioRecorder.start() has its own
+        // fallback for the edge case where status is still .notDetermined
+        // when the user first presses the hotkey.
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         AppLogger.log("mic permission at launch: status=\(micStatus.rawValue)")
-        if micStatus == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                AppLogger.log("mic permission granted=\(granted)")
-            }
-        }
 
         setupMenuBar()
         overlayController = OverlayWindowController()
@@ -69,26 +67,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         KeyboardShortcuts.onKeyDown(for: .toggleRecording) { [weak self] in
-            guard let self else { return }
-            if self.isPushToTalkMode {
-                // Hold-to-talk: start on key down, stop on key up.
-                if self.state == .idle {
-                    AppLogger.log("PTT down — start")
-                    self.startRecording()
-                }
-            } else {
-                AppLogger.log("hotkey toggleRecording fired")
-                self.toggleRecording()
-            }
+            AppLogger.log("hotkey toggleRecording fired")
+            self?.toggleRecording()
         }
 
-        KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [weak self] in
-            guard let self, self.isPushToTalkMode else { return }
-            if self.state == .recording {
-                AppLogger.log("PTT up — stop")
-                self.stopAndTranscribe()
-            }
-        }
+        // Kick off the sidecar install in the background as soon as the app
+        // launches. By the time the user reaches the Engine step in onboarding
+        // (or relaunches with a broken daemon), the heavy work is mid-flight
+        // or done. No-ops cleanly if a daemon is already running.
+        SidecarInstaller.shared.ensureRunning()
 
         // First-launch onboarding — only show once per install.
         if !UserDefaults.standard.bool(forKey: Self.onboardingSeenKey) {
@@ -118,10 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-    }
-
-    private var isPushToTalkMode: Bool {
-        UserDefaults.standard.bool(forKey: "pushToTalkMode")
     }
 
     private func setupMenuBar() {

@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import AppKit
 import ApplicationServices
+import KeyboardShortcuts
 import SwiftUI
 
 enum OnboardingWindowFactory {
@@ -30,12 +31,14 @@ private enum Step: Int, CaseIterable {
     case welcome
     case permissions
     case engine
+    case hotkey
     case done
 }
 
 private struct OnboardingView: View {
     let onFinish: () -> Void
     @State private var step: Step = .welcome
+    @ObservedObject private var installer = SidecarInstaller.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -57,9 +60,16 @@ private struct OnboardingView: View {
         switch step {
         case .welcome: WelcomeStep()
         case .permissions: PermissionsStep()
-        case .engine: EngineStep(onReady: { advance() })
+        case .engine: EngineStep()
+        case .hotkey: HotkeyStep()
         case .done: DoneStep()
         }
+    }
+
+    /// True if we should block the user from advancing past the current step.
+    /// Only applies to the Engine step while an install is in flight.
+    private var blockAdvance: Bool {
+        step == .engine && !installer.stage.isTerminal
     }
 
     private var footer: some View {
@@ -80,19 +90,27 @@ private struct OnboardingView: View {
                     .keyboardShortcut(.cancelAction)
             }
 
-            Button(step == .done ? "Done" : "Continue") {
+            Button(continueLabel) {
                 advance()
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
+            .disabled(blockAdvance)
         }
+    }
+
+    private var continueLabel: String {
+        if step == .done { return "Done" }
+        if step == .engine, !installer.stage.isTerminal { return "Installing…" }
+        return "Continue"
     }
 
     private func advance() {
         switch step {
         case .welcome: step = .permissions
         case .permissions: step = .engine
-        case .engine: step = .done
+        case .engine: step = .hotkey
+        case .hotkey: step = .done
         case .done: onFinish()
         }
     }
@@ -155,46 +173,49 @@ private struct PermissionsStep: View {
     @State private var pollTimer: Timer?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Grant a few permissions")
                     .font(.system(size: 22, weight: .semibold))
-                Text("OpenLark needs three things from macOS to work. Each opens a different System Settings pane.")
+                Text("Click each button. The first shows a macOS prompt; the other two open System Settings — toggle the OpenLark switch on.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(spacing: 10) {
                 PermissionRow(
                     title: "Microphone",
                     subtitle: "Record your voice for transcription.",
+                    helper: "macOS will show a permission prompt.",
                     icon: "mic.fill",
+                    buttonLabel: "Allow",
                     granted: micGranted,
-                    action: requestMicrophone,
-                    openSettings: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") }
+                    action: requestMicrophone
                 )
                 PermissionRow(
                     title: "Accessibility",
-                    subtitle: "Inject the transcribed text into the focused app.",
+                    subtitle: "Paste transcribed text into the focused app.",
+                    helper: "System Settings will open — toggle the OpenLark switch on.",
                     icon: "hand.point.up.left.fill",
+                    buttonLabel: "Open Settings",
                     granted: accessibilityGranted,
-                    action: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") },
-                    openSettings: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
+                    action: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") }
                 )
                 PermissionRow(
                     title: "Input Monitoring",
-                    subtitle: "Capture the Esc key globally while recording.",
+                    subtitle: "Catch the Esc key globally while recording.",
+                    helper: "System Settings will open — toggle the OpenLark switch on.",
                     icon: "keyboard.fill",
+                    buttonLabel: "Open Settings",
                     granted: inputMonitoringGranted,
-                    action: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") },
-                    openSettings: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") }
+                    action: { open("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") }
                 )
             }
 
-            Text("You can come back to this any time from the menu bar → Settings.")
+            Text("Status updates here automatically when you toggle a switch in System Settings.")
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
-                .padding(.top, 4)
 
             Spacer()
         }
@@ -214,11 +235,7 @@ private struct PermissionsStep: View {
     private func refresh() {
         let mic = AVCaptureDevice.authorizationStatus(for: .audio)
         micGranted = (mic == .authorized)
-        // AXIsProcessTrusted reflects current Accessibility state.
         accessibilityGranted = AXIsProcessTrusted()
-        // Input Monitoring isn't trivially queryable; reuse Accessibility as a proxy
-        // (anyone who's granted Accessibility usually grants Input Monitoring too)
-        // until we add a more precise check via IOHIDCheckAccess.
         inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     }
 
@@ -227,8 +244,10 @@ private struct PermissionsStep: View {
         if status == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         } else if status == .denied || status == .restricted {
+            // Already denied at the system level — only System Settings can flip it.
             open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         }
+        // status == .authorized: poll will pick it up
     }
 
     private func open(_ url: String) {
@@ -239,10 +258,11 @@ private struct PermissionsStep: View {
 private struct PermissionRow: View {
     let title: String
     let subtitle: String
+    let helper: String
     let icon: String
+    let buttonLabel: String
     let granted: Bool
     let action: () -> Void
-    let openSettings: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -257,9 +277,10 @@ private struct PermissionRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 14, weight: .medium))
-                Text(subtitle)
+                Text(granted ? subtitle : helper)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if granted {
@@ -270,7 +291,7 @@ private struct PermissionRow: View {
                     .background(Capsule().fill(Color.green.opacity(0.15)))
                     .foregroundStyle(.green)
             } else {
-                Button("Grant") { action() }
+                Button(buttonLabel) { action() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             }
@@ -288,19 +309,16 @@ private struct PermissionRow: View {
 }
 
 private struct EngineStep: View {
-    let onReady: () -> Void
-    @StateObject private var installer = SidecarInstaller()
-    @State private var hasStarted = false
+    @ObservedObject private var installer = SidecarInstaller.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Install the speech engine")
+                Text("Speech engine")
                     .font(.system(size: 22, weight: .semibold))
-                Text("OpenLark uses a small background daemon to run NVIDIA Parakeet on Apple's MLX. It's about a 30 MB download for Python + 150 MB for the inference libraries — only done once.")
+                Text("One-time setup — about 180 MB.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Spacer()
@@ -312,7 +330,7 @@ private struct EngineStep: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: .infinity)
 
-                if case .downloadingPython(let p) = installer.stage {
+                if case .downloading(let p) = installer.stage {
                     ProgressView(value: p)
                         .progressViewStyle(.linear)
                         .frame(maxWidth: 280)
@@ -320,7 +338,7 @@ private struct EngineStep: View {
 
                 if installer.stage.isError {
                     Button("Retry") {
-                        Task { await installer.install() }
+                        installer.ensureRunning()
                     }
                     .buttonStyle(.borderedProminent)
                     .padding(.top, 4)
@@ -329,30 +347,11 @@ private struct EngineStep: View {
             .frame(maxWidth: .infinity)
 
             Spacer()
-
-            if !hasStarted && !installer.stage.isTerminal {
-                Button {
-                    hasStarted = true
-                    Task {
-                        await installer.install()
-                        if case .done = installer.stage { onReady() }
-                        if case .alreadyInstalled = installer.stage { onReady() }
-                    }
-                } label: {
-                    Text("Install speech engine")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-            }
         }
         .onAppear {
-            // Auto-skip the step if the daemon is already healthy from a prior install.
-            if installer.isDaemonHealthy() {
-                installer.stage = .alreadyInstalled
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { onReady() }
-            }
+            // App launched with onboarding open and no daemon — make sure the
+            // installer is running. ensureRunning() is idempotent.
+            installer.ensureRunning()
         }
     }
 
@@ -378,6 +377,38 @@ private struct EngineStep: View {
     }
 }
 
+private struct HotkeyStep: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Pick a hotkey")
+                    .font(.system(size: 22, weight: .semibold))
+                Text("Press the keys you want to use to start dictating from any app. Default is ⌘↑.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("Toggle recording")
+                    .font(.system(size: 14))
+                Spacer()
+                KeyboardShortcuts.Recorder(for: .toggleRecording)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.04))
+            )
+
+            Spacer()
+
+            Text("You can change this any time from menu bar → Settings → General.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+    }
+}
+
 private struct DoneStep: View {
     var body: some View {
         VStack(alignment: .center, spacing: 16) {
@@ -399,7 +430,7 @@ private struct DoneStep: View {
             VStack(alignment: .leading, spacing: 8) {
                 tip(icon: "menubar.arrow.up.rectangle", text: "OpenLark lives in the menu bar — click the waveform icon for History, Settings, and Vocabulary.")
                 tip(icon: "text.book.closed", text: "Add custom words and snippets in Settings → Vocabulary for things the model gets wrong.")
-                tip(icon: "command.square", text: "Change the hotkey or switch to push-to-talk in Settings → General.")
+                tip(icon: "command.square", text: "Change the hotkey any time from Settings → General.")
             }
             .padding(.top, 8)
 

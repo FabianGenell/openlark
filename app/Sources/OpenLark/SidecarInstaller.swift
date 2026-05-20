@@ -1,27 +1,27 @@
+import Darwin
 import Foundation
 
 /// One-shot installer for the Python inference daemon.
 ///
-/// Run from the onboarding window after permissions are granted. Does this:
-///   1. Downloads a self-contained Python (`python-build-standalone`) into
-///      ~/Library/Application Support/OpenLark/runtime/
-///   2. Creates a venv inside that runtime, pip-installs parakeet-mlx + mlx + numpy
-///   3. Copies the bundled server.py into ~/Library/Application Support/OpenLark/sidecar/
-///   4. Writes ~/Library/LaunchAgents/app.openlark.sidecar.plist pointing at the
-///      installed venv's Python and the copied server.py
-///   5. launchctl loads the agent
+/// Downloads a pre-built runtime tarball (Python + parakeet-mlx + mlx + numpy)
+/// from the openlark GitHub releases, extracts it into
+/// ~/Library/Application Support/OpenLark/runtime/, copies the bundled
+/// server.py into ~/Library/Application Support/OpenLark/sidecar/, writes the
+/// launchd plist, and loads it.
 ///
-/// Idempotent: if the venv + plist already exist, it skips the heavy steps and
-/// just re-loads the agent.
+/// One HTTPS GET + `tar -xzf` instead of "download Python, create venv, pip
+/// install many wheels". Much faster (3-4×), much more reliable (no pip
+/// resolve, no transient PyPI errors).
 @MainActor
 final class SidecarInstaller: ObservableObject {
+    static let shared = SidecarInstaller()
+
     enum Stage: Equatable {
         case idle
         case checking
         case alreadyInstalled
-        case downloadingPython(progress: Double)
-        case extractingPython
-        case installingWheels
+        case downloading(progress: Double)
+        case extracting
         case registeringDaemon
         case waitingForSocket
         case done
@@ -30,11 +30,10 @@ final class SidecarInstaller: ObservableObject {
         var description: String {
             switch self {
             case .idle: return "Ready"
-            case .checking: return "Checking for existing install…"
+            case .checking: return "Checking…"
             case .alreadyInstalled: return "Speech engine already installed"
-            case .downloadingPython(let p): return "Downloading Python runtime — \(Int(p * 100))%"
-            case .extractingPython: return "Extracting runtime…"
-            case .installingWheels: return "Installing parakeet-mlx + mlx (one-time, ~150 MB)…"
+            case .downloading(let p): return "Downloading speech engine — \(Int(p * 100))%"
+            case .extracting: return "Extracting…"
             case .registeringDaemon: return "Registering background daemon…"
             case .waitingForSocket: return "Starting daemon…"
             case .done: return "Speech engine ready"
@@ -52,12 +51,35 @@ final class SidecarInstaller: ObservableObject {
         var isError: Bool {
             if case .failed = self { return true } else { return false }
         }
+
+        var caseKey: String {
+            switch self {
+            case .idle: return "idle"
+            case .checking: return "checking"
+            case .alreadyInstalled: return "alreadyInstalled"
+            case .downloading: return "downloading"
+            case .extracting: return "extracting"
+            case .registeringDaemon: return "registeringDaemon"
+            case .waitingForSocket: return "waitingForSocket"
+            case .done: return "done"
+            case .failed: return "failed"
+            }
+        }
     }
 
-    @Published var stage: Stage = .idle
+    @Published var stage: Stage = .idle {
+        didSet {
+            if stage.caseKey != oldValue.caseKey {
+                AppLogger.log("installer stage: \(stage.description)")
+            }
+        }
+    }
 
-    private let pythonURL = URL(string:
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.13.13+20260510-aarch64-apple-darwin-install_only.tar.gz"
+    /// Prebuilt runtime bundle. Bump the URL when the wheel set changes
+    /// (parakeet-mlx version bump, Python bump, etc.). Each new bundle gets
+    /// its own runtime-vN release so updates are explicit.
+    private let runtimeBundleURL = URL(string:
+        "https://github.com/FabianGenell/openlark/releases/download/runtime-v1/openlark-runtime-arm64-darwin.tar.gz"
     )!
 
     var supportRoot: URL {
@@ -65,8 +87,10 @@ final class SidecarInstaller: ObservableObject {
             .appendingPathComponent("OpenLark", isDirectory: true)
     }
     var runtimeRoot: URL { supportRoot.appendingPathComponent("runtime", isDirectory: true) }
-    var venvRoot: URL { supportRoot.appendingPathComponent("venv", isDirectory: true) }
     var sidecarRoot: URL { supportRoot.appendingPathComponent("sidecar", isDirectory: true) }
+    var runtimePython: URL { runtimeRoot.appendingPathComponent("python/bin/python3") }
+    var serverScript: URL { sidecarRoot.appendingPathComponent("server.py") }
+
     var logsRoot: URL {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
@@ -77,33 +101,66 @@ final class SidecarInstaller: ObservableObject {
             .appendingPathComponent("LaunchAgents", isDirectory: true)
             .appendingPathComponent("app.openlark.sidecar.plist")
     }
-    var venvPython: URL { venvRoot.appendingPathComponent("bin/python") }
-    var bundledPython: URL { runtimeRoot.appendingPathComponent("python/bin/python3") }
-    var serverScript: URL { sidecarRoot.appendingPathComponent("server.py") }
 
-    /// True if the daemon is already running and responding on the socket.
-    /// We don't care WHERE it was installed from (this app's installer, the
-    /// shell-script install, or a manual setup) — if the socket is up the user
-    /// already has a working daemon and we should leave it alone.
+    private var isRunning = false
+
+    /// True if a daemon is already serving on the socket. Doesn't care which
+    /// installer put it there. A bare file-exists check would falsely report
+    /// healthy when the daemon crashed and left a stale socket — we probe
+    /// with a real connect.
     func isDaemonHealthy() -> Bool {
-        FileManager.default.fileExists(atPath: "/tmp/openlark.sock")
+        guard FileManager.default.fileExists(atPath: "/tmp/openlark.sock") else {
+            return false
+        }
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array("/tmp/openlark.sock".utf8)
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dst in
+                for (i, b) in pathBytes.enumerated() { dst[i] = CChar(b) }
+                dst[pathBytes.count] = 0
+            }
+        }
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 {
+            return true
+        }
+        // Stale socket — daemon dead. Unlink so launchctl load can re-bind cleanly.
+        try? FileManager.default.removeItem(atPath: "/tmp/openlark.sock")
+        return false
+    }
+
+    func ensureRunning() {
+        guard !isRunning, !stage.isTerminal || stage.isError else { return }
+        Task { await install() }
     }
 
     func install() async {
+        if isRunning { return }
+        isRunning = true
+        defer { isRunning = false }
         stage = .checking
+
+        if isDaemonHealthy() {
+            stage = .alreadyInstalled
+            return
+        }
+
         do {
             try FileManager.default.createDirectory(at: supportRoot, withIntermediateDirectories: true)
             try FileManager.default.createDirectory(at: logsRoot, withIntermediateDirectories: true)
-
-            // Always copy the bundled server.py — keeps the daemon in sync with
-            // whatever app version is currently installed.
             try copyServerScript()
 
-            if FileManager.default.fileExists(atPath: venvPython.path) {
-                AppLogger.log("installer: venv already exists, skipping download")
-            } else {
-                try await downloadAndExtractPython()
-                try await installWheels()
+            if !FileManager.default.fileExists(atPath: runtimePython.path) {
+                try await downloadAndExtractRuntime()
             }
 
             stage = .registeringDaemon
@@ -129,67 +186,40 @@ final class SidecarInstaller: ObservableObject {
         guard let bundled = Bundle.main.url(forResource: "server", withExtension: "py", subdirectory: "sidecar") else {
             throw NSError(
                 domain: "OpenLark.installer", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "bundled server.py missing from app — corrupt .app bundle?"]
+                userInfo: [NSLocalizedDescriptionKey: "bundled server.py missing — corrupt .app bundle?"]
             )
         }
         try? FileManager.default.removeItem(at: serverScript)
         try FileManager.default.copyItem(at: bundled, to: serverScript)
     }
 
-    private func downloadAndExtractPython() async throws {
+    private func downloadAndExtractRuntime() async throws {
         try FileManager.default.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
-        let tarURL = runtimeRoot.appendingPathComponent("python.tar.gz")
+        let tarPath = runtimeRoot.appendingPathComponent("runtime.tar.gz")
 
-        // Download with progress.
-        try await downloadFile(from: pythonURL, to: tarURL) { progress in
-            self.stage = .downloadingPython(progress: progress)
+        try await downloadFile(from: runtimeBundleURL, to: tarPath) { progress in
+            self.stage = .downloading(progress: progress)
         }
 
-        stage = .extractingPython
+        stage = .extracting
         try await runProcess(
             executable: "/usr/bin/tar",
-            arguments: ["-xzf", tarURL.path, "-C", runtimeRoot.path]
+            arguments: ["-xzf", tarPath.path, "-C", runtimeRoot.path]
         )
-        try? FileManager.default.removeItem(at: tarURL)
+        try? FileManager.default.removeItem(at: tarPath)
 
-        guard FileManager.default.fileExists(atPath: bundledPython.path) else {
+        guard FileManager.default.fileExists(atPath: runtimePython.path) else {
             throw NSError(
                 domain: "OpenLark.installer", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "Python runtime missing after extract — expected \(bundledPython.path)"]
+                userInfo: [NSLocalizedDescriptionKey: "runtime layout unexpected — \(runtimePython.path) missing after extract"]
             )
         }
-    }
-
-    private func installWheels() async throws {
-        stage = .installingWheels
-        // Create venv with the bundled Python so the venv has a stable path
-        // even if we later upgrade the runtime.
-        try? FileManager.default.removeItem(at: venvRoot)
-        try await runProcess(
-            executable: bundledPython.path,
-            arguments: ["-m", "venv", venvRoot.path]
-        )
-
-        // Upgrade pip + install wheels.
-        try await runProcess(
-            executable: venvPython.path,
-            arguments: ["-m", "pip", "install", "--upgrade", "pip", "wheel"]
-        )
-        try await runProcess(
-            executable: venvPython.path,
-            arguments: [
-                "-m", "pip", "install",
-                "parakeet-mlx>=0.3.5,<0.4",
-                "numpy>=2.0",
-                "mlx>=0.18",
-            ]
-        )
     }
 
     private func writeLaunchAgent() throws {
         let plist: [String: Any] = [
             "Label": "app.openlark.sidecar",
-            "ProgramArguments": [venvPython.path, serverScript.path],
+            "ProgramArguments": [runtimePython.path, serverScript.path],
             "WorkingDirectory": sidecarRoot.path,
             "EnvironmentVariables": [
                 "OPENLARK_SOCKET": "/tmp/openlark.sock",
@@ -214,7 +244,8 @@ final class SidecarInstaller: ObservableObject {
 
     private func loadLaunchAgent() throws {
         // Unload any prior version of the agent — older installs from the
-        // shell-script path may still be registered.
+        // shell-script path or previous installer versions may still be
+        // registered.
         _ = try? runProcessSync(
             executable: "/bin/launchctl",
             arguments: ["unload", launchAgentURL.path]
@@ -227,18 +258,18 @@ final class SidecarInstaller: ObservableObject {
 
     private func waitForSocket() async throws {
         // Sidecar startup is dominated by the model load on first launch
-        // (which downloads ~600 MB from HuggingFace) but we don't want to wait
-        // for that — just for the socket to bind. Give it 30s tops.
+        // (which downloads ~600 MB from HuggingFace). We don't wait for that
+        // here — just for the socket to bind.
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             if FileManager.default.fileExists(atPath: "/tmp/openlark.sock") { return }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
         // Don't error — the daemon may still be downloading the model. We've
-        // done our part; surface "ready" and let the daemon catch up.
+        // done our part; report ready and let the daemon catch up.
     }
 
-    // MARK: - Process / download helpers
+    // MARK: - Process helpers
 
     private func runProcess(executable: String, arguments: [String]) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -249,20 +280,38 @@ final class SidecarInstaller: ObservableObject {
                 let pipe = Pipe()
                 process.standardError = pipe
                 process.standardOutput = pipe
+
+                // Drain incrementally so subprocesses with verbose output
+                // can't block on a full pipe buffer.
+                let bufferLock = NSLock()
+                var collected = Data()
+                pipe.fileHandleForReading.readabilityHandler = { handle in
+                    let chunk = handle.availableData
+                    if chunk.isEmpty { return }
+                    bufferLock.lock()
+                    if collected.count < 64 * 1024 {
+                        collected.append(chunk.prefix(64 * 1024 - collected.count))
+                    }
+                    bufferLock.unlock()
+                }
+
                 do {
                     try process.run()
                     process.waitUntilExit()
+                    pipe.fileHandleForReading.readabilityHandler = nil
                     if process.terminationStatus != 0 {
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        let msg = String(data: data, encoding: .utf8) ?? "exit \(process.terminationStatus)"
+                        let msg = String(data: collected, encoding: .utf8) ?? ""
+                        AppLogger.log("subprocess failed (exit \(process.terminationStatus)): \(executable)")
+                        AppLogger.log("output: \(msg.split(separator: "\n").suffix(10).joined(separator: "\n"))")
                         cont.resume(throwing: NSError(
                             domain: "OpenLark.installer", code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: "\(executable) failed: \(msg.prefix(400))"]
+                            userInfo: [NSLocalizedDescriptionKey: "\(executable) failed (exit \(process.terminationStatus))"]
                         ))
                     } else {
                         cont.resume()
                     }
                 } catch {
+                    pipe.fileHandleForReading.readabilityHandler = nil
                     cont.resume(throwing: error)
                 }
             }
@@ -288,38 +337,47 @@ final class SidecarInstaller: ObservableObject {
         to destination: URL,
         progress: @MainActor @escaping (Double) -> Void
     ) async throws {
-        let session = URLSession(configuration: .default)
-        let (asyncBytes, response) = try await session.bytes(from: url)
-        let total = response.expectedContentLength
+        // Use URLSession's native download task via the delegate-based progress
+        // API. The previous `URLSession.bytes(from:)` implementation iterated
+        // one byte at a time through Swift's async machinery, dropping a
+        // 16 MB/s connection to ~125 KB/s on large files.
+        let delegate = DownloadProgressDelegate(progress: progress)
+        let (tempURL, _) = try await URLSession.shared.download(from: url, delegate: delegate)
         try? FileManager.default.removeItem(at: destination)
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: destination) else {
-            throw NSError(
-                domain: "OpenLark.installer", code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "could not open \(destination.path) for writing"]
-            )
-        }
-        defer { try? handle.close() }
-
-        var buffer = Data(capacity: 1024 * 1024)
-        var received: Int64 = 0
-        var lastReported = Date(timeIntervalSince1970: 0)
-        for try await byte in asyncBytes {
-            buffer.append(byte)
-            received += 1
-            if buffer.count >= 1024 * 1024 {
-                try handle.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-            if total > 0, Date().timeIntervalSince(lastReported) > 0.1 {
-                let p = max(0, min(1, Double(received) / Double(total)))
-                await MainActor.run { progress(p) }
-                lastReported = Date()
-            }
-        }
-        if !buffer.isEmpty {
-            try handle.write(contentsOf: buffer)
-        }
+        try FileManager.default.moveItem(at: tempURL, to: destination)
         await MainActor.run { progress(1.0) }
     }
+}
+
+private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    let progressCallback: @MainActor (Double) -> Void
+
+    init(progress: @MainActor @escaping (Double) -> Void) {
+        self.progressCallback = progress
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        let p: Double
+        if totalBytesExpectedToWrite > 0 {
+            p = max(0, min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        } else {
+            p = 0
+        }
+        let cb = progressCallback
+        Task { @MainActor in cb(p) }
+    }
+
+    // Required by URLSessionDownloadDelegate but unused — the async download()
+    // variant handles file placement; we just move the returned tempURL.
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {}
 }

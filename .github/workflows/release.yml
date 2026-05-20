@@ -108,19 +108,11 @@ jobs:
 
             1. Download `OpenLark.app.zip` below and unzip it.
             2. Drag `OpenLark.app` to `~/Applications`.
-            3. Install [`uv`](https://github.com/astral-sh/uv) if you don't already have it:
-               ```
-               curl -LsSf https://astral.sh/uv/install.sh | sh
-               ```
-            4. Set up the inference daemon (one-time, downloads the ~600 MB model):
-               ```
-               git clone https://github.com/${{ github.repository }}.git
-               cd openlark
-               ./scripts/install-sidecar.sh
-               ```
-            5. Right-click `OpenLark.app` → **Open** (Gatekeeper, first launch only).
+            3. Right-click `OpenLark.app` → **Open** (Gatekeeper, first launch only).
                Or: `xattr -dr com.apple.quarantine ~/Applications/OpenLark.app`
-            6. Grant **Microphone**, **Accessibility** and **Input Monitoring** in System Settings → Privacy & Security.
+            4. Follow the in-app onboarding — grant permissions and wait for the speech engine (~144 MB, one-time).
+
+            That's it. No `git clone`, no `uv`, no shell scripts. The first transcription also fetches the Parakeet model (~600 MB) from HuggingFace on demand.
 
             ## Verify
 
