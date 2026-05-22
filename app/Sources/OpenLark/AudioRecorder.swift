@@ -48,10 +48,17 @@ final class AudioRecorder: NSObject {
             AppLogger.log("available audio device: '\(d.localizedName)' uid=\(d.uniqueID) type=\(d.deviceType.rawValue)")
         }
 
-        guard let device = AVCaptureDevice.default(for: .audio) else {
+        let device: AVCaptureDevice
+        if let preferredID = AudioInputs.selectedDeviceID,
+           let preferred = AVCaptureDevice(uniqueID: preferredID) {
+            device = preferred
+            AppLogger.log("using user-selected audio device: \(device.localizedName) uid=\(device.uniqueID)")
+        } else if let fallback = AVCaptureDevice.default(for: .audio) {
+            device = fallback
+            AppLogger.log("using default audio device: \(device.localizedName) uid=\(device.uniqueID)")
+        } else {
             throw RecorderError.noDevice
         }
-        AppLogger.log("using default audio device: \(device.localizedName) uid=\(device.uniqueID)")
 
         let session = AVCaptureSession()
         let input: AVCaptureDeviceInput

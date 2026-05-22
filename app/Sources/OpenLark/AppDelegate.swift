@@ -77,6 +77,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // or done. No-ops cleanly if a daemon is already running.
         SidecarInstaller.shared.ensureRunning()
 
+        // Populate the downloaded-models cache so the menu bar's Model
+        // submenu is correct on first open (no flicker / "no models yet"
+        // false negative).
+        DownloadedModelsCache.shared.refresh()
+
         // First-launch onboarding — only show once per install.
         if !UserDefaults.standard.bool(forKey: Self.onboardingSeenKey) {
             DispatchQueue.main.async { [weak self] in
@@ -107,6 +112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+    private var micMenu: NSMenu!
+    private var modelMenu: NSMenu!
+    private var micMenuItem: NSMenuItem!
+    private var modelMenuItem: NSMenuItem!
+
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
@@ -117,11 +127,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(NSMenuItem(
             title: "Toggle Recording (⌘↑)",
             action: #selector(menuToggleRecording),
             keyEquivalent: ""
         ))
+        menu.addItem(.separator())
+
+        // Microphone submenu — rebuilt every time the parent menu opens.
+        micMenu = NSMenu()
+        micMenu.delegate = self
+        micMenuItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        micMenuItem.image = NSImage(systemSymbolName: "mic", accessibilityDescription: nil)
+        micMenuItem.submenu = micMenu
+        menu.addItem(micMenuItem)
+
+        // Model submenu — only downloaded models, rebuilt every open.
+        modelMenu = NSMenu()
+        modelMenu.delegate = self
+        modelMenuItem = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
+        modelMenuItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
+        modelMenuItem.submenu = modelMenu
+        menu.addItem(modelMenuItem)
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "History…",
@@ -140,6 +169,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "q"
         ))
         statusItem.menu = menu
+    }
+
+    // MARK: - Mic / Model submenus
+
+    fileprivate func rebuildMicMenu() {
+        micMenu.removeAllItems()
+        let devices = AudioInputs.available()
+        let selected = AudioInputs.selectedDeviceID
+
+        let systemDefault = NSMenuItem(
+            title: "System Default",
+            action: #selector(selectMic(_:)),
+            keyEquivalent: ""
+        )
+        systemDefault.representedObject = NSNull()
+        systemDefault.state = (selected == nil) ? .on : .off
+        systemDefault.target = self
+        micMenu.addItem(systemDefault)
+
+        if !devices.isEmpty {
+            micMenu.addItem(.separator())
+        }
+
+        for device in devices {
+            let item = NSMenuItem(
+                title: device.name,
+                action: #selector(selectMic(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = device.uniqueID
+            item.state = (selected == device.uniqueID) ? .on : .off
+            item.target = self
+            micMenu.addItem(item)
+        }
+
+        // Update the parent row title to show the currently-selected device,
+        // so users see what's active without opening the submenu.
+        let activeName = devices.first { $0.uniqueID == selected }?.name
+            ?? "System Default"
+        micMenuItem.title = "Microphone — \(activeName)"
+    }
+
+    fileprivate func rebuildModelMenu() {
+        modelMenu.removeAllItems()
+        let downloaded = DownloadedModelsCache.shared.downloadedModels()
+        let activeId = UserModelSettings.activeModelId
+
+        if downloaded.isEmpty {
+            let empty = NSMenuItem(
+                title: "No models downloaded yet",
+                action: nil,
+                keyEquivalent: ""
+            )
+            empty.isEnabled = false
+            modelMenu.addItem(empty)
+            modelMenu.addItem(.separator())
+            let openSettings = NSMenuItem(
+                title: "Open Settings → Models…",
+                action: #selector(openSettings),
+                keyEquivalent: ""
+            )
+            openSettings.target = self
+            modelMenu.addItem(openSettings)
+        } else {
+            for model in downloaded {
+                let item = NSMenuItem(
+                    title: model.displayName,
+                    action: #selector(selectModel(_:)),
+                    keyEquivalent: ""
+                )
+                item.representedObject = model.id
+                item.state = (model.id == activeId) ? .on : .off
+                item.target = self
+                modelMenu.addItem(item)
+            }
+            modelMenu.addItem(.separator())
+            let manage = NSMenuItem(
+                title: "Manage models…",
+                action: #selector(openSettings),
+                keyEquivalent: ""
+            )
+            manage.target = self
+            modelMenu.addItem(manage)
+        }
+
+        let activeName = downloaded.first { $0.id == activeId }?.displayName
+            ?? ModelRegistry.find(activeId)?.displayName
+            ?? "—"
+        modelMenuItem.title = "Model — \(activeName)"
+    }
+
+    @objc private func selectMic(_ sender: NSMenuItem) {
+        let id = sender.representedObject as? String
+        AudioInputs.setSelectedDeviceID(id)
+        AppLogger.log("mic selection changed: \(id ?? "system-default")")
+    }
+
+    @objc private func selectModel(_ sender: NSMenuItem) {
+        guard let modelId = sender.representedObject as? String else { return }
+        UserDefaults.standard.set(modelId, forKey: UserModelSettings.activeModelIdKey)
+        AppLogger.log("active model changed via menu: \(modelId)")
     }
 
     @objc private func menuToggleRecording() {
@@ -256,7 +386,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { [weak self] in
             guard let self else { return }
-            let result = await self.sidecar.transcribe(wav: wav)
+            let modelId = UserModelSettings.activeModelId
+            let languages = UserModelSettings.selectedLanguageCodes
+            let result = await self.sidecar.transcribe(
+                wav: wav, modelId: modelId, languages: languages
+            )
             self.overlayController.hide()
             switch result {
             case .success(let raw):
@@ -302,5 +436,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func removeEscMonitor() {
         EscEventTap.shared.disable()
+    }
+}
+
+extension AppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === statusItem.menu {
+            // Trigger a background refresh of the downloaded-models cache so
+            // the Model submenu reflects anything the user just downloaded.
+            DownloadedModelsCache.shared.refresh()
+            rebuildMicMenu()
+            rebuildModelMenu()
+        } else if menu === micMenu {
+            rebuildMicMenu()
+        } else if menu === modelMenu {
+            rebuildModelMenu()
+        }
     }
 }

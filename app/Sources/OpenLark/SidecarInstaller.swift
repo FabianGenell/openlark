@@ -79,7 +79,7 @@ final class SidecarInstaller: ObservableObject {
     /// (parakeet-mlx version bump, Python bump, etc.). Each new bundle gets
     /// its own runtime-vN release so updates are explicit.
     private let runtimeBundleURL = URL(string:
-        "https://github.com/FabianGenell/openlark/releases/download/runtime-v1/openlark-runtime-arm64-darwin.tar.gz"
+        "https://github.com/FabianGenell/openlark/releases/download/runtime-v2/openlark-runtime-arm64-darwin.tar.gz"
     )!
 
     var supportRoot: URL {
@@ -101,6 +101,18 @@ final class SidecarInstaller: ObservableObject {
             .appendingPathComponent("LaunchAgents", isDirectory: true)
             .appendingPathComponent("app.openlark.sidecar.plist")
     }
+
+    /// Marker file recording the wire-protocol version of the currently-
+    /// installed sidecar. Bump `currentInstalledVersion` whenever server.py
+    /// changes in a way that breaks the running daemon (new env vars,
+    /// new wire protocol, new pip deps). On launch we compare; mismatch
+    /// triggers an in-place reinstall (daemon unload + new plist + load).
+    var installedVersionURL: URL {
+        supportRoot.appendingPathComponent(".installed-version", isDirectory: false)
+    }
+    /// v3 = multi-model JSON-header protocol + mlx-whisper dep
+    /// (HF_HOME was tried in v2; reverted to default to keep existing caches).
+    private let currentInstalledVersion = "3"
 
     private var isRunning = false
 
@@ -149,7 +161,9 @@ final class SidecarInstaller: ObservableObject {
         defer { isRunning = false }
         stage = .checking
 
-        if isDaemonHealthy() {
+        let configIsCurrent = installedVersionMatches()
+
+        if isDaemonHealthy() && configIsCurrent {
             stage = .alreadyInstalled
             return
         }
@@ -163,12 +177,24 @@ final class SidecarInstaller: ObservableObject {
                 try await downloadAndExtractRuntime()
             }
 
+            // Always tear down any old daemon when the installed version is
+            // stale — an old server.py can't talk the new wire protocol.
+            if !configIsCurrent {
+                AppLogger.log("config version stale — restarting sidecar")
+                _ = try? runProcessSync(
+                    executable: "/bin/launchctl",
+                    arguments: ["unload", launchAgentURL.path]
+                )
+                try? FileManager.default.removeItem(atPath: "/tmp/openlark.sock")
+            }
+
             stage = .registeringDaemon
             try writeLaunchAgent()
             try loadLaunchAgent()
 
             stage = .waitingForSocket
             try await waitForSocket()
+            writeInstalledVersion()
 
             stage = .done
         } catch is CancellationError {
@@ -180,6 +206,23 @@ final class SidecarInstaller: ObservableObject {
     }
 
     // MARK: - Steps
+
+    private func installedVersionMatches() -> Bool {
+        guard let data = try? Data(contentsOf: installedVersionURL),
+              let s = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines) == currentInstalledVersion
+    }
+
+    private func writeInstalledVersion() {
+        try? FileManager.default.createDirectory(
+            at: supportRoot, withIntermediateDirectories: true
+        )
+        try? currentInstalledVersion.write(
+            to: installedVersionURL, atomically: true, encoding: .utf8
+        )
+    }
 
     private func copyServerScript() throws {
         try FileManager.default.createDirectory(at: sidecarRoot, withIntermediateDirectories: true)
@@ -226,6 +269,9 @@ final class SidecarInstaller: ObservableObject {
                 "PYTHONUNBUFFERED": "1",
                 "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             ],
+            // Models are cached at the HuggingFace default ~/.cache/huggingface
+            // so existing downloads (from before multi-model support) are
+            // detected and not re-downloaded.
             "RunAtLoad": true,
             "KeepAlive": true,
             "StandardOutPath": logsRoot.appendingPathComponent("sidecar.log").path,
