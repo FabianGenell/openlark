@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var historyWindow: NSWindow?
     private var onboardingWindow: NSWindow?
-    private static let onboardingSeenKey = "onboardingSeen"
+    static let onboardingSeenKey = "onboardingSeen"
     private let recorder = AudioRecorder()
     private let sidecar = SidecarClient()
     private let vocab = VocabStore.shared

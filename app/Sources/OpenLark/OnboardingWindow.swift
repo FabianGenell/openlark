@@ -109,7 +109,17 @@ private struct OnboardingView: View {
         switch step {
         case .welcome: step = .permissions
         case .permissions: step = .engine
-        case .engine: step = .hotkey
+        case .engine:
+            step = .hotkey
+            // Mark onboarding as seen the moment the user reaches the hotkey
+            // step. Permissions + engine are the only things the app actually
+            // needs to function — the hotkey defaults to ⌘↑ even if this step
+            // is skipped or crashes. Setting the flag here prevents the
+            // infinite-onboarding loop if anything goes wrong from this point
+            // on (e.g. the KeyboardShortcuts recorder failing under app
+            // translocation, which the TranslocationGuard should already have
+            // prevented but we want defense-in-depth).
+            UserDefaults.standard.set(true, forKey: AppDelegate.onboardingSeenKey)
         case .hotkey: step = .done
         case .done: onFinish()
         }
