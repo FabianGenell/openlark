@@ -37,12 +37,19 @@ import socket
 import socketserver
 import struct
 import sys
+import threading
 import time
 import traceback
 import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+# Bound every HuggingFace network read. Without this a stalled/trickling
+# connection (captive portal, throttled CDN) can leave from_pretrained /
+# snapshot_download blocking indefinitely on a socket read. This caps each
+# individual read so a dead connection raises instead of hanging forever.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
 
 import numpy as np
 
@@ -51,6 +58,65 @@ HEADER = struct.Struct(">I")
 SOCKET_TIMEOUT_S = 30.0
 PREFETCH_TIMEOUT_S = 30 * 60  # 30 min — large Whisper models can take a while on slow links
 MAX_PAYLOAD_BYTES = 200 * 1024 * 1024
+
+# ---------------------------------------------------------------------------
+# Watchdog - self-healing hang recovery
+#
+# The server is single-threaded and every request runs synchronously on the
+# main thread. If a request wedges (a stuck MLX call, a runaway model load,
+# a signal-handler deadlock), the socket timeout does NOT help: it only guards
+# the blocking recv/send syscalls, not the compute in between. A hung process
+# stays alive, so launchd's KeepAlive never respawns it and the app blocks
+# forever waiting for a reply.
+#
+# The watchdog is a daemon thread that force-exits the process if the current
+# request runs past a per-command hard deadline. On exit, launchd (KeepAlive)
+# restarts the daemon and the default model reloads in ~2s. Any single stuck
+# request self-heals instead of bricking dictation until the next reboot.
+# ---------------------------------------------------------------------------
+
+# Per-command hard deadlines (seconds). Transcription is normally <3s; a cold
+# model load adds a few more. 180s is far above any healthy path but low enough
+# that a real hang recovers quickly. Prefetch downloads legitimately take long.
+DEADLINE_BY_CMD = {
+    "ping": 15.0,
+    "models": 60.0,
+    "delete": 120.0,
+    "transcribe": 180.0,
+    "prefetch": 45 * 60.0,
+}
+DEFAULT_DEADLINE_S = 60.0
+WATCHDOG_POLL_S = 5.0
+# How often the daemon emits a keepalive frame during a model download so the
+# app can bound its per-recv wait without false-tripping on a live download.
+PREFETCH_HEARTBEAT_S = 5.0
+
+_watchdog_lock = threading.Lock()
+_request_deadline: Optional[float] = None  # monotonic deadline of the in-flight request
+
+
+def _arm_watchdog(seconds: float) -> None:
+    global _request_deadline
+    with _watchdog_lock:
+        _request_deadline = time.monotonic() + seconds
+
+
+def _disarm_watchdog() -> None:
+    global _request_deadline
+    with _watchdog_lock:
+        _request_deadline = None
+
+
+def _watchdog_loop() -> None:
+    while True:
+        time.sleep(WATCHDOG_POLL_S)
+        with _watchdog_lock:
+            deadline = _request_deadline
+        if deadline is not None and time.monotonic() > deadline:
+            log("watchdog: request exceeded its deadline - force-exiting so launchd respawns a fresh daemon")
+            # os._exit skips atexit/finally on purpose: the process may be
+            # wedged in native code where a clean shutdown could itself hang.
+            os._exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -269,18 +335,37 @@ def prefetch(model_id: str, send_event) -> None:
 
     from huggingface_hub import snapshot_download
 
-    # snapshot_download has no built-in fractional progress callback. We send
-    # an indeterminate progress event so the UI can show a spinner, then a
-    # terminal "done" event when the download finishes.
+    # snapshot_download has no fractional progress callback, so we run it on a
+    # worker thread and emit an indeterminate progress heartbeat every few
+    # seconds while it runs. The heartbeat lets the client tell a live download
+    # apart from a wedged one: it resets a bounded per-recv timeout on the app
+    # side, so a real stall (no frame for the timeout window) surfaces as an
+    # error there instead of an infinite spinner. HF_HUB_DOWNLOAD_TIMEOUT also
+    # caps each read so a dead connection raises here within ~30s.
     send_event({"event": "progress", "value": -1.0})
-    try:
-        snapshot_download(
-            repo_id=spec.repo,
-            # Skip safetensors index duplicates, keep weights + tokenizer.
-            allow_patterns=["*.safetensors", "*.json", "*.txt", "*.npz", "*.tiktoken", "tokenizer*", "*.model"],
-        )
-    except Exception as exc:
-        send_event({"event": "error", "message": f"{exc}"})
+
+    result: dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            snapshot_download(
+                repo_id=spec.repo,
+                # Skip safetensors index duplicates, keep weights + tokenizer.
+                allow_patterns=["*.safetensors", "*.json", "*.txt", "*.npz", "*.tiktoken", "tokenizer*", "*.model"],
+            )
+            result["ok"] = True
+        except Exception as exc:  # noqa: BLE001 - surfaced to the client below
+            result["error"] = str(exc)
+
+    worker = threading.Thread(target=_run, name="prefetch-download", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(timeout=PREFETCH_HEARTBEAT_S)
+        if worker.is_alive():
+            send_event({"event": "progress", "value": -1.0})
+
+    if "error" in result:
+        send_event({"event": "error", "message": result["error"]})
         return
     send_event({"event": "done"})
 
@@ -334,6 +419,7 @@ class Handler(socketserver.BaseRequestHandler):
             return
 
         cmd = header.get("cmd", "transcribe")  # default for forward-compat with the simplest clients
+        _arm_watchdog(DEADLINE_BY_CMD.get(cmd, DEFAULT_DEADLINE_S))
         try:
             if cmd == "ping":
                 send_frame(sock, {"event": "pong"})
@@ -372,8 +458,22 @@ class Handler(socketserver.BaseRequestHandler):
                 model_id = header.get("model", DEFAULT_MODEL_ID)
                 languages = header.get("languages", []) or []
                 wav_bytes = recv_audio(sock)
+                # Never download a model inside a transcribe request. A cold
+                # download (~600 MB) far exceeds any sane client timeout, so the
+                # app would time out, kill the daemon mid-download, and retry -
+                # an infinite loop that never produces text. Fail fast instead;
+                # the model is fetched explicitly via the `prefetch` command
+                # (onboarding + Settings), which streams progress.
+                spec = MODELS.get(model_id)
+                if spec is None:
+                    send_frame(sock, {"event": "error", "message": f"unknown model id: {model_id}", "code": "unknown_model"})
+                    return
+                if _current_model_id != model_id and not hf_cache_has(spec.repo):
+                    send_frame(sock, {"event": "error", "message": f"model not downloaded: {model_id}", "code": "model_missing"})
+                    return
                 audio, sr = read_wav_to_float32(wav_bytes)
-                # Model load can exceed the 30s default — extend while loading.
+                # A cached model load still costs a couple seconds - extend the
+                # socket timeout while loading + transcribing (watchdog covers it).
                 sock.settimeout(PREFETCH_TIMEOUT_S)
                 text = transcribe(model_id, languages, audio, sr)
                 sock.settimeout(SOCKET_TIMEOUT_S)
@@ -390,6 +490,8 @@ class Handler(socketserver.BaseRequestHandler):
                 send_frame(sock, {"event": "error", "message": str(exc)})
             except OSError:
                 pass
+        finally:
+            _disarm_watchdog()
 
 
 class UnixStreamServer(socketserver.UnixStreamServer):
@@ -402,24 +504,50 @@ def main() -> int:
     if socket_path.exists():
         socket_path.unlink()
 
-    # Pre-load the default model so first transcription is instant.
-    try:
-        load_model(DEFAULT_MODEL_ID)
-    except Exception as exc:
-        log(f"warning: default model preload failed: {exc}")
+    # Watchdog first - before anything that could wedge (model load, socket
+    # bind). A hang during startup now still force-exits and lets launchd respawn.
+    threading.Thread(target=_watchdog_loop, name="watchdog", daemon=True).start()
 
+    # Bind + start listening BEFORE any model work. UnixStreamServer.__init__
+    # binds and calls listen(), so the socket exists and accepts connections
+    # the instant this returns. This is critical for first launch: the app can
+    # connect immediately and get a fast, honest answer (even "model_missing")
+    # instead of the daemon being unreachable for minutes while it downloads a
+    # model - which used to make every dictation kick the daemon and restart
+    # the download from scratch, forever.
     server = UnixStreamServer(str(socket_path), Handler)
     os.chmod(socket_path, 0o600)
     log(f"listening on {socket_path}")
 
+    # Preload the default model ONLY if it is already downloaded. Never trigger
+    # a network download here - that is what wedged startup before. A cold model
+    # is fetched via the explicit `prefetch` command (onboarding + Settings)
+    # with a progress UI; the first transcribe then loads the cached weights.
+    try:
+        spec = MODELS.get(DEFAULT_MODEL_ID)
+        if spec is not None and hf_cache_has(spec.repo):
+            _arm_watchdog(DEADLINE_BY_CMD["transcribe"])
+            load_model(DEFAULT_MODEL_ID)
+            _disarm_watchdog()
+        else:
+            log(f"default model {DEFAULT_MODEL_ID} not downloaded - will load on first use after prefetch")
+    except Exception as exc:
+        _disarm_watchdog()
+        log(f"warning: default model preload failed: {exc}")
+
     def shutdown(*_):
+        # Runs on the main thread, interrupting serve_forever(). Do NOT call
+        # server.shutdown() here - it blocks until serve_forever() returns,
+        # which cannot happen while this handler owns the main thread. That
+        # self-deadlock left the daemon alive-but-wedged (holding the socket,
+        # never serving), which launchd's KeepAlive can't recover from because
+        # the process never dies. Just unlink and hard-exit; launchd respawns.
         log("shutting down")
-        server.shutdown()
         try:
             socket_path.unlink()
         except OSError:
             pass
-        sys.exit(0)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)

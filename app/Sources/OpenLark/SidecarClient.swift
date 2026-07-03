@@ -19,6 +19,7 @@ actor SidecarClient {
         case connectFailed(Int32)
         case sendFailed
         case recvEOF
+        case timedOut
         case malformed(String)
         case serverError(String)
     }
@@ -27,6 +28,27 @@ actor SidecarClient {
 
     init(socketPath: String = "/tmp/openlark.sock") {
         self.socketPath = socketPath
+    }
+
+    /// Kill and respawn the inference daemon via launchd. Used to self-heal
+    /// when a request times out (the daemon is wedged but still holding the
+    /// socket). `kickstart -k` terminates the running instance; KeepAlive in
+    /// the launchd plist brings a fresh one back within ~2s.
+    nonisolated static func restartDaemon() {
+        // Runs on a background queue: launchctl + waitUntilExit must never block
+        // the main actor (it's called from the transcription failure path).
+        DispatchQueue.global().async {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            task.arguments = ["kickstart", "-k", "gui/\(getuid())/app.openlark.sidecar"]
+            do {
+                try task.run()
+                task.waitUntilExit()
+                AppLogger.log("restartDaemon: launchctl kickstart exit=\(task.terminationStatus)")
+            } catch {
+                AppLogger.log("restartDaemon: failed to launch launchctl: \(error)")
+            }
+        }
     }
 
     // MARK: - Transcribe
@@ -42,7 +64,11 @@ actor SidecarClient {
                 "model": modelId,
                 "languages": languages,
             ]
-            let response = try sendRequest(header: header, audio: wav, expectMultiFrame: false)
+            // 90s covers a cold model load plus inference. The daemon's own
+            // watchdog fires at 180s, so the app gives up first and can restart it.
+            let response = try sendRequest(
+                header: header, audio: wav, expectMultiFrame: false, recvTimeout: 90
+            )
             guard let first = response.first else {
                 return .failure(SidecarError.recvEOF)
             }
@@ -55,6 +81,22 @@ actor SidecarClient {
             return .failure(SidecarError.malformed("missing 'text' in response"))
         } catch {
             return .failure(error)
+        }
+    }
+
+    // MARK: - Ping
+
+    /// Round-trips a ping to confirm the daemon is not just bound to the socket
+    /// but actually serving. Bounded to 5s so a wedged daemon reports unhealthy
+    /// instead of blocking the caller.
+    func ping() async -> Bool {
+        do {
+            let frames = try sendRequest(
+                header: ["cmd": "ping"], audio: nil, expectMultiFrame: false, recvTimeout: 5
+            )
+            return (frames.first?["event"] as? String) == "pong"
+        } catch {
+            return false
         }
     }
 
@@ -71,7 +113,7 @@ actor SidecarClient {
     func listModels() async -> Result<[RemoteModelStatus], Error> {
         do {
             let frames = try sendRequest(
-                header: ["cmd": "models"], audio: nil, expectMultiFrame: false
+                header: ["cmd": "models"], audio: nil, expectMultiFrame: false, recvTimeout: 60
             )
             guard let first = frames.first,
                   let raw = first["models"] as? [[String: Any]] else {
@@ -100,7 +142,8 @@ actor SidecarClient {
             let frames = try sendRequest(
                 header: ["cmd": "delete", "model": modelId],
                 audio: nil,
-                expectMultiFrame: false
+                expectMultiFrame: false,
+                recvTimeout: 120
             )
             if let first = frames.first,
                (first["event"] as? String) == "error",
@@ -122,10 +165,15 @@ actor SidecarClient {
         onProgress: @escaping (Double) -> Void
     ) async -> Result<Void, Error> {
         do {
+            // The daemon emits a progress heartbeat every ~5s during the
+            // download, so a 60s per-recv timeout resets on each frame and only
+            // trips on a genuine stall (no frame for 60s) rather than hanging
+            // forever on a dead connection.
             let frames = try sendRequest(
                 header: ["cmd": "prefetch", "model": modelId],
                 audio: nil,
                 expectMultiFrame: true,
+                recvTimeout: 60,
                 onFrame: { frame in
                     let event = frame["event"] as? String ?? ""
                     if event == "progress" {
@@ -134,11 +182,19 @@ actor SidecarClient {
                     }
                 }
             )
-            // Final frame should be "done" or "error".
-            if let last = frames.last,
-               (last["event"] as? String) == "error",
-               let msg = last["message"] as? String {
-                return .failure(SidecarError.serverError(msg))
+            // Success requires the terminal "done" frame. If the stream ended
+            // on an error frame - or just EOF'd after progress (daemon died /
+            // download interrupted) - treat it as a failure so the model is not
+            // falsely marked downloaded and the UI can offer retry.
+            guard let last = frames.last else {
+                return .failure(SidecarError.recvEOF)
+            }
+            let lastEvent = last["event"] as? String
+            if lastEvent == "error" {
+                return .failure(SidecarError.serverError((last["message"] as? String) ?? "download failed"))
+            }
+            if lastEvent != "done" {
+                return .failure(SidecarError.malformed("download ended without completing"))
             }
             return .success(())
         } catch {
@@ -151,15 +207,30 @@ actor SidecarClient {
     /// Returns all received frames in order. If `expectMultiFrame` is false,
     /// reads exactly one frame. Otherwise reads until EOF (server closes
     /// after the terminal frame).
+    /// - Parameter recvTimeout: per-recv wall-clock limit in seconds. If the
+    ///   daemon accepts the connection but never replies (wedged mid-request),
+    ///   recv unblocks with `.timedOut` instead of hanging forever. Pass 0 to
+    ///   disable (used for prefetch, whose downloads legitimately run long).
     private func sendRequest(
         header: [String: Any],
         audio: Data?,
         expectMultiFrame: Bool,
+        recvTimeout: TimeInterval = 0,
         onFrame: ((_ frame: [String: Any]) -> Void)? = nil
     ) throws -> [[String: Any]] {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw SidecarError.socketCreate }
         defer { close(fd) }
+
+        if recvTimeout > 0 {
+            var tv = timeval(
+                tv_sec: Int(recvTimeout),
+                tv_usec: Int32((recvTimeout - Double(Int(recvTimeout))) * 1_000_000)
+            )
+            let tvSize = socklen_t(MemoryLayout<timeval>.size)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvSize)
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
+        }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -250,6 +321,9 @@ actor SidecarClient {
                     count - got,
                     0
                 )
+                if result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    throw SidecarError.timedOut
+                }
                 if result <= 0 { throw SidecarError.recvEOF }
                 got += result
             }
@@ -271,6 +345,9 @@ actor SidecarClient {
                     count - got,
                     0
                 )
+                if result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    throw SidecarError.timedOut
+                }
                 if result == 0 && got == 0 {
                     clean = true
                     return

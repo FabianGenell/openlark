@@ -345,12 +345,28 @@ private struct EngineStep: View {
                         .progressViewStyle(.linear)
                         .frame(maxWidth: 280)
                 }
+                if case .downloadingModel(let p) = installer.stage, p >= 0 {
+                    ProgressView(value: p)
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 280)
+                }
 
                 if installer.stage.isError {
                     Button("Retry") {
                         installer.ensureRunning()
                     }
                     .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+                } else if !installer.stage.isTerminal {
+                    // Escape hatch: a stalled step (slow download, wedged
+                    // launchctl) must never trap the user with a disabled
+                    // Continue. Cancelling moves the install to .failed, which
+                    // swaps this for the Retry button.
+                    Button("Cancel") {
+                        installer.cancelInstall()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                     .padding(.top, 4)
                 }
             }

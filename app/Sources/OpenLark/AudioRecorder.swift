@@ -87,7 +87,7 @@ final class AudioRecorder: NSObject {
         defer { teardown() }
         guard let session else { return nil }
         AppLogger.log("recorder.stop: session.isRunning=\(session.isRunning)")
-        session.stopRunning()
+        stopSessionRunning(session)
         let buffer: [Int16] = samplesQueue.sync { samples }
         AppLogger.log("recorder.stop: \(buffer.count) samples (\(Double(buffer.count) / 16000.0)s)")
         if buffer.isEmpty { return nil }
@@ -138,11 +138,30 @@ final class AudioRecorder: NSObject {
 
     private func teardown() {
         guard let session else { return }
-        if session.isRunning { session.stopRunning() }
+        stopSessionRunning(session)
         for input in session.inputs { session.removeInput(input) }
         for output in session.outputs { session.removeOutput(output) }
         self.session = nil
         self.sourceSampleRate = 0
+    }
+
+    /// Stop the session off the main thread with a bounded wait. `stopRunning()`
+    /// blocks until the session halts; a wedged/removed audio device can make
+    /// that take a long time, which - called directly on the main thread -
+    /// froze the whole app on stop. We run it on a background thread and wait at
+    /// most 3s. In the normal case it returns in milliseconds (so captured
+    /// samples are fully flushed before we read them); in the pathological case
+    /// the UI is freed and we proceed with whatever was captured.
+    private func stopSessionRunning(_ session: AVCaptureSession) {
+        guard session.isRunning else { return }
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            session.stopRunning()
+            done.signal()
+        }
+        if done.wait(timeout: .now() + 3) == .timedOut {
+            AppLogger.log("⚠ session.stopRunning() exceeded 3s - wedged audio device; continuing")
+        }
     }
 
     private func resampleLinear(_ input: [Int16], from src: Double, to dst: Double) -> [Int16] {

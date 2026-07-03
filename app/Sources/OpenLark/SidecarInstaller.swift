@@ -24,6 +24,7 @@ final class SidecarInstaller: ObservableObject {
         case extracting
         case registeringDaemon
         case waitingForSocket
+        case downloadingModel(progress: Double)
         case done
         case failed(String)
 
@@ -36,6 +37,8 @@ final class SidecarInstaller: ObservableObject {
             case .extracting: return "Extracting…"
             case .registeringDaemon: return "Registering background daemon…"
             case .waitingForSocket: return "Starting daemon…"
+            case .downloadingModel(let p):
+                return p < 0 ? "Downloading speech model…" : "Downloading speech model - \(Int(p * 100))%"
             case .done: return "Speech engine ready"
             case .failed(let m): return "Failed: \(m)"
             }
@@ -61,6 +64,7 @@ final class SidecarInstaller: ObservableObject {
             case .extracting: return "extracting"
             case .registeringDaemon: return "registeringDaemon"
             case .waitingForSocket: return "waitingForSocket"
+            case .downloadingModel: return "downloadingModel"
             case .done: return "done"
             case .failed: return "failed"
             }
@@ -111,10 +115,14 @@ final class SidecarInstaller: ObservableObject {
         supportRoot.appendingPathComponent(".installed-version", isDirectory: false)
     }
     /// v3 = multi-model JSON-header protocol + mlx-whisper dep
-    /// (HF_HOME was tried in v2; reverted to default to keep existing caches).
-    private let currentInstalledVersion = "3"
+    ///      (HF_HOME was tried in v2; reverted to default to keep existing caches).
+    /// v4 = hang-hardened daemon: socket binds before model load, startup
+    ///      watchdog, fail-fast on missing model, prefetch heartbeats. Bumped so
+    ///      existing installs get the new server.py + restart on next launch.
+    private let currentInstalledVersion = "4"
 
     private var isRunning = false
+    private var installTask: Task<Void, Never>?
 
     /// True if a daemon is already serving on the socket. Doesn't care which
     /// installer put it there. A bare file-exists check would falsely report
@@ -152,7 +160,14 @@ final class SidecarInstaller: ObservableObject {
 
     func ensureRunning() {
         guard !isRunning, !stage.isTerminal || stage.isError else { return }
-        Task { await install() }
+        installTask = Task { await install() }
+    }
+
+    /// User-triggered abort from the onboarding UI. Cancels the in-flight
+    /// install; install() catches CancellationError and moves to .failed, which
+    /// surfaces the Retry button so the user is never trapped on a stalled step.
+    func cancelInstall() {
+        installTask?.cancel()
     }
 
     func install() async {
@@ -176,29 +191,37 @@ final class SidecarInstaller: ObservableObject {
             if !FileManager.default.fileExists(atPath: runtimePython.path) {
                 try await downloadAndExtractRuntime()
             }
+            try Task.checkCancellation()
 
             // Always tear down any old daemon when the installed version is
             // stale — an old server.py can't talk the new wire protocol.
             if !configIsCurrent {
                 AppLogger.log("config version stale — restarting sidecar")
-                _ = try? runProcessSync(
+                _ = try? await runProcess(
                     executable: "/bin/launchctl",
-                    arguments: ["unload", launchAgentURL.path]
+                    arguments: ["unload", launchAgentURL.path],
+                    timeout: 20
                 )
                 try? FileManager.default.removeItem(atPath: "/tmp/openlark.sock")
             }
 
             stage = .registeringDaemon
             try writeLaunchAgent()
-            try loadLaunchAgent()
+            try await loadLaunchAgent()
 
             stage = .waitingForSocket
-            try await waitForSocket()
-            writeInstalledVersion()
+            try await waitForDaemon()
 
+            // The engine is not truly ready until the active speech model is
+            // downloaded. Do it here with visible progress and bounded timeouts
+            // rather than letting the first dictation trigger a silent,
+            // unbounded multi-minute download that looks like a hang.
+            try await prefetchActiveModel()
+
+            writeInstalledVersion()
             stage = .done
         } catch is CancellationError {
-            stage = .failed("cancelled")
+            stage = .failed("Setup cancelled - press Retry to try again.")
         } catch {
             AppLogger.log("installer failed: \(error)")
             stage = .failed(error.localizedDescription)
@@ -274,6 +297,10 @@ final class SidecarInstaller: ObservableObject {
             // detected and not re-downloaded.
             "RunAtLoad": true,
             "KeepAlive": true,
+            // Cap respawn rate so a daemon that crashes on startup logs at a
+            // sane cadence instead of spinning. The app separately detects a
+            // dead engine via the ping in waitForDaemon() and surfaces Retry.
+            "ThrottleInterval": 10,
             "StandardOutPath": logsRoot.appendingPathComponent("sidecar.log").path,
             "StandardErrorPath": logsRoot.appendingPathComponent("sidecar.log").path,
             "ProcessType": "Interactive",
@@ -288,36 +315,64 @@ final class SidecarInstaller: ObservableObject {
         try data.write(to: launchAgentURL)
     }
 
-    private func loadLaunchAgent() throws {
+    private func loadLaunchAgent() async throws {
         // Unload any prior version of the agent — older installs from the
         // shell-script path or previous installer versions may still be
-        // registered.
-        _ = try? runProcessSync(
+        // registered. Runs off the main thread (via runProcess) with a bounded
+        // timeout so a wedged launchctl can't freeze the UI or the install.
+        _ = try? await runProcess(
             executable: "/bin/launchctl",
-            arguments: ["unload", launchAgentURL.path]
+            arguments: ["unload", launchAgentURL.path],
+            timeout: 20
         )
-        try runProcessSync(
+        try await runProcess(
             executable: "/bin/launchctl",
-            arguments: ["load", launchAgentURL.path]
+            arguments: ["load", launchAgentURL.path],
+            timeout: 20
         )
     }
 
-    private func waitForSocket() async throws {
-        // Sidecar startup is dominated by the model load on first launch
-        // (which downloads ~600 MB from HuggingFace). We don't wait for that
-        // here — just for the socket to bind.
+    private func waitForDaemon() async throws {
+        // Verify the daemon is actually SERVING with a real ping round-trip, not
+        // just that the socket file exists. A socket that exists but never
+        // answers (crash loop, wedged startup) used to be reported as "ready",
+        // stranding the user with a dead engine and no error. If no ping
+        // succeeds within the deadline we throw, so stage becomes .failed and
+        // the Retry button appears. The daemon now binds its socket before any
+        // model work, so a healthy daemon answers within a second or two.
+        let client = SidecarClient()
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
-            if FileManager.default.fileExists(atPath: "/tmp/openlark.sock") { return }
+            try Task.checkCancellation()
+            if await client.ping() { return }
             try await Task.sleep(nanoseconds: 500_000_000)
         }
-        // Don't error — the daemon may still be downloading the model. We've
-        // done our part; report ready and let the daemon catch up.
+        throw NSError(
+            domain: "OpenLark.installer", code: 3,
+            userInfo: [NSLocalizedDescriptionKey:
+                "Speech engine didn't start. Check ~/Library/Logs/OpenLark/sidecar.log, then press Retry."]
+        )
+    }
+
+    private func prefetchActiveModel() async throws {
+        let client = SidecarClient()
+        let modelId = UserModelSettings.activeModelId
+        stage = .downloadingModel(progress: -1)
+        let result = await client.prefetch(modelId: modelId) { [weak self] p in
+            Task { @MainActor in self?.stage = .downloadingModel(progress: p) }
+        }
+        if case .failure(let err) = result {
+            throw err
+        }
     }
 
     // MARK: - Process helpers
 
-    private func runProcess(executable: String, arguments: [String]) async throws {
+    private func runProcess(
+        executable: String,
+        arguments: [String],
+        timeout: TimeInterval? = nil
+    ) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global().async {
                 let process = Process()
@@ -343,6 +398,13 @@ final class SidecarInstaller: ObservableObject {
 
                 do {
                     try process.run()
+                    // Bound the wait: a wedged subprocess (e.g. launchctl not
+                    // returning) is force-terminated so install() can never hang.
+                    if let timeout {
+                        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                            if process.isRunning { process.terminate() }
+                        }
+                    }
                     process.waitUntilExit()
                     pipe.fileHandleForReading.readabilityHandler = nil
                     if process.terminationStatus != 0 {
@@ -364,31 +426,26 @@ final class SidecarInstaller: ObservableObject {
         }
     }
 
-    private func runProcessSync(executable: String, arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        try process.run()
-        process.waitUntilExit()
-        if process.terminationStatus != 0 {
-            throw NSError(
-                domain: "OpenLark.installer", code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: "\(executable) failed (exit \(process.terminationStatus))"]
-            )
-        }
-    }
-
     private func downloadFile(
         from url: URL,
         to destination: URL,
         progress: @MainActor @escaping (Double) -> Void
     ) async throws {
-        // Use URLSession's native download task via the delegate-based progress
-        // API. The previous `URLSession.bytes(from:)` implementation iterated
-        // one byte at a time through Swift's async machinery, dropping a
-        // 16 MB/s connection to ~125 KB/s on large files.
+        // Bounded session - NOT URLSession.shared. shared's default
+        // timeoutIntervalForResource is 7 days, so a stalled or trickling
+        // connection (captive portal, throttled wifi) downloads forever and
+        // traps onboarding with no error. timeoutIntervalForRequest is an
+        // inactivity timer (fail if no bytes for 60s); timeoutIntervalForResource
+        // caps the whole transfer. Either firing throws → stage=.failed → Retry.
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 900  // 15 min hard cap
+        config.waitsForConnectivity = false
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+
         let delegate = DownloadProgressDelegate(progress: progress)
-        let (tempURL, _) = try await URLSession.shared.download(from: url, delegate: delegate)
+        let (tempURL, _) = try await session.download(from: url, delegate: delegate)
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: tempURL, to: destination)
         await MainActor.run { progress(1.0) }

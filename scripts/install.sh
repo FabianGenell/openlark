@@ -20,15 +20,21 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 echo "› ensuring sidecar venv..."
-if [ ! -d "$SIDECAR_DIR/.venv" ]; then
-    cd "$SIDECAR_DIR"
+# Gate on the actual dependency, not just the directory. An interrupted first
+# run leaves a .venv with no packages; keying off directory existence would then
+# skip the install forever and leave a crash-looping daemon. Verify the import
+# and rebuild from scratch if it's missing or broken.
+cd "$SIDECAR_DIR"
+PYTHON_BIN="$SIDECAR_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ] || ! "$PYTHON_BIN" -c 'import parakeet_mlx, numpy' >/dev/null 2>&1; then
+    echo "  (building sidecar venv - missing or incomplete)"
+    rm -rf "$SIDECAR_DIR/.venv"
     uv venv --python 3.13
     uv pip install parakeet-mlx numpy
 fi
 
-PYTHON_BIN="$SIDECAR_DIR/.venv/bin/python"
-if [ ! -x "$PYTHON_BIN" ]; then
-    echo "✗ python venv not found at $PYTHON_BIN"
+if [ ! -x "$PYTHON_BIN" ] || ! "$PYTHON_BIN" -c 'import parakeet_mlx, numpy' >/dev/null 2>&1; then
+    echo "✗ sidecar venv build failed - parakeet_mlx/numpy not importable at $PYTHON_BIN"
     exit 1
 fi
 

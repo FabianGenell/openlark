@@ -408,6 +408,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .failure(let err):
                 AppLogger.log("transcription failed: \(err)")
                 NSSound.beep()
+                // Restart the daemon ONLY when it's genuinely wedged (timeout)
+                // or unreachable (connect failed). A serverError like
+                // "model_missing" is a fast, honest answer - the daemon is fine,
+                // the model just isn't downloaded - so restarting would be
+                // pointless. The transcribe path never downloads, so a timeout
+                // now always means a real wedge, not a legit long download.
+                switch err {
+                case SidecarClient.SidecarError.timedOut:
+                    AppLogger.log("restarting wedged speech engine")
+                    SidecarClient.restartDaemon()
+                case SidecarClient.SidecarError.connectFailed:
+                    AppLogger.log("restarting unreachable speech engine")
+                    SidecarClient.restartDaemon()
+                case SidecarClient.SidecarError.serverError(let msg) where msg.contains("model not downloaded"):
+                    AppLogger.log("active model not downloaded - open Settings → Models to download it")
+                default:
+                    break
+                }
             }
             self.recordingStartedAt = nil
             self.recordingFrontmostApp = nil
