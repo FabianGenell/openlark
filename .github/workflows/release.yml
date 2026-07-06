@@ -1,8 +1,11 @@
-name: Release
+name: Build check
 
+# Releases are cut locally with scripts/release-notarized.sh, which signs with
+# the Heltra LLC Developer ID certificate and notarizes the app. That key stays
+# on the release machine and never lives in GitHub secrets, so CI does not
+# publish releases. This workflow is a manual build smoke-check only; it never
+# creates a GitHub release (a CI build would be self-signed and un-notarized).
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -94,31 +97,3 @@ jobs:
           path: |
             build/OpenLark.app.zip
             build/OpenLark.app.zip.sha256
-
-      - name: Create release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            build/OpenLark.app.zip
-            build/OpenLark.app.zip.sha256
-          generate_release_notes: true
-          body: |
-            ## Install
-
-            1. Download `OpenLark.app.zip` below and unzip it.
-            2. Drag `OpenLark.app` to `~/Applications`.
-            3. Right-click `OpenLark.app` → **Open** (Gatekeeper, first launch only).
-               Or: `xattr -dr com.apple.quarantine ~/Applications/OpenLark.app`
-            4. Follow the in-app onboarding — grant permissions and wait for the speech engine (~144 MB, one-time).
-
-            That's it. No `git clone`, no `uv`, no shell scripts. The first transcription also fetches the Parakeet model (~600 MB) from HuggingFace on demand.
-
-            ## Verify
-
-            SHA-256 of `OpenLark.app.zip`:
-            ```
-            ${{ steps.artifact.outputs.sha256 }}
-            ```
-
-            See the [README](https://github.com/${{ github.repository }}#readme) for details.

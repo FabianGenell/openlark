@@ -30,16 +30,12 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
 ### From a release
 
 1. Download the latest `OpenLark.app.zip` from [Releases](../../releases) and unzip.
-2. Drag `OpenLark.app` to `~/Applications`.
-3. Right-click `OpenLark.app` → **Open** the first time (Gatekeeper warning — this is an unsigned app), or run:
-   ```bash
-   xattr -dr com.apple.quarantine ~/Applications/OpenLark.app
-   ```
-4. The app walks you through:
+2. Drag `OpenLark.app` to `~/Applications` and open it. The app is signed and notarized by Apple (Heltra LLC), so it opens with no Gatekeeper warning.
+3. The app walks you through:
    - Granting **Microphone**, **Accessibility** and **Input Monitoring** permissions
-   - Downloading the speech engine (one-time, ~180 MB — embedded Python + Parakeet MLX libraries)
+   - Downloading the speech engine (one-time, ~144 MB, embedded Python + Parakeet MLX libraries)
    - Background daemon registration
-5. Press your hotkey (default `⌘+↑`) and dictate.
+4. Press your hotkey (default `⌘+↑`) and dictate.
 
 That's it — no `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~600 MB Parakeet model from HuggingFace (~3 min on typical broadband).
 
