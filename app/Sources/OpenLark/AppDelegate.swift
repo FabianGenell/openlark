@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overlayController: OverlayWindowController!
     private var settingsWindow: NSWindow?
     private var historyWindow: NSWindow?
+    private let settingsNavigator = SettingsNavigator()
     private var onboardingWindow: NSWindow?
     static let onboardingSeenKey = "onboardingSeen"
     private let recorder = AudioRecorder()
@@ -52,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AppLogger.log("launch-at-login status: \(service.status.rawValue)")
 
-        // Don't fire the mic permission prompt here — it would appear before
+        // Don't fire the mic permission prompt here. It would appear before
         // the welcome window, out of context. Onboarding's PermissionsStep
         // requests it as part of the flow. AudioRecorder.start() has its own
         // fallback for the edge case where status is still .notDetermined
@@ -82,7 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // false negative).
         DownloadedModelsCache.shared.refresh()
 
-        // First-launch onboarding — only show once per install.
+        // First-launch onboarding, shown once per install.
         if !UserDefaults.standard.bool(forKey: Self.onboardingSeenKey) {
             DispatchQueue.main.async { [weak self] in
                 self?.showOnboarding()
@@ -116,8 +117,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var modelMenu: NSMenu!
     private var micMenuItem: NSMenuItem!
     private var modelMenuItem: NSMenuItem!
+    private var copyLastMenuItem: NSMenuItem!
 
     private func setupMenuBar() {
+        // No keyEquivalents on any of these items. The app runs as .accessory
+        // with no main menu, so a status-menu key equivalent only fires while
+        // the menu is already open. Showing one implies a global shortcut that
+        // doesn't exist. The real global hotkey is registered separately
+        // through KeyboardShortcuts, and only Toggle Recording has one.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(
@@ -133,9 +140,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(menuToggleRecording),
             keyEquivalent: ""
         ))
+
+        // Puts the most recent transcript back on the clipboard, for when
+        // something else has overwritten it since dictating.
+        copyLastMenuItem = NSMenuItem(
+            title: "Copy Last Transcription",
+            action: #selector(copyLastTranscript),
+            keyEquivalent: ""
+        )
+        copyLastMenuItem.image = NSImage(
+            systemSymbolName: "doc.on.doc",
+            accessibilityDescription: nil
+        )
+        menu.addItem(copyLastMenuItem)
         menu.addItem(.separator())
 
-        // Microphone submenu — rebuilt every time the parent menu opens.
+        // Microphone submenu, rebuilt every time the parent menu opens.
         micMenu = NSMenu()
         micMenu.delegate = self
         micMenuItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
@@ -143,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         micMenuItem.submenu = micMenu
         menu.addItem(micMenuItem)
 
-        // Model submenu — only downloaded models, rebuilt every open.
+        // Model submenu, only downloaded models, rebuilt every open.
         modelMenu = NSMenu()
         modelMenu.delegate = self
         modelMenuItem = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
@@ -155,18 +175,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(
             title: "History…",
             action: #selector(openHistory),
-            keyEquivalent: "h"
+            keyEquivalent: ""
         ))
         menu.addItem(NSMenuItem(
             title: "Settings…",
             action: #selector(openSettings),
-            keyEquivalent: ","
+            keyEquivalent: ""
         ))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit OpenLark",
             action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
+            keyEquivalent: ""
         ))
         statusItem.menu = menu
     }
@@ -208,7 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so users see what's active without opening the submenu.
         let activeName = devices.first { $0.uniqueID == selected }?.name
             ?? "System Default"
-        micMenuItem.title = "Microphone — \(activeName)"
+        micMenuItem.title = "Microphone: \(activeName)"
     }
 
     fileprivate func rebuildModelMenu() {
@@ -227,7 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             modelMenu.addItem(.separator())
             let openSettings = NSMenuItem(
                 title: "Open Settings → Models…",
-                action: #selector(openSettings),
+                action: #selector(openModelsSettings),
                 keyEquivalent: ""
             )
             openSettings.target = self
@@ -247,7 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             modelMenu.addItem(.separator())
             let manage = NSMenuItem(
                 title: "Manage models…",
-                action: #selector(openSettings),
+                action: #selector(openModelsSettings),
                 keyEquivalent: ""
             )
             manage.target = self
@@ -256,8 +276,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let activeName = downloaded.first { $0.id == activeId }?.displayName
             ?? ModelRegistry.find(activeId)?.displayName
-            ?? "—"
-        modelMenuItem.title = "Model — \(activeName)"
+            ?? "none"
+        modelMenuItem.title = "Model: \(activeName)"
     }
 
     @objc private func selectMic(_ sender: NSMenuItem) {
@@ -270,6 +290,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let modelId = sender.representedObject as? String else { return }
         UserDefaults.standard.set(modelId, forKey: UserModelSettings.activeModelIdKey)
         AppLogger.log("active model changed via menu: \(modelId)")
+    }
+
+    // MARK: - Copy last transcript
+
+    /// Keeps the row's title showing what would be copied. Enablement is
+    /// handled by validateMenuItem.
+    fileprivate func refreshCopyLastItem() {
+        guard let entry = history.entries.first else {
+            copyLastMenuItem.title = "Copy Last Transcription"
+            return
+        }
+        copyLastMenuItem.title = "Copy Last Transcription: \(Self.preview(entry.text))"
+    }
+
+    /// Opening few words of a transcript, quoted, for a menu title. Just
+    /// enough to recognise which dictation it is without widening the menu.
+    private static func preview(_ text: String, maxWords: Int = 2, limit: Int = 20) -> String {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        guard !words.isEmpty else { return "" }
+
+        var kept = words.prefix(maxWords).joined(separator: " ")
+        var truncated = words.count > maxWords
+        if kept.count > limit {
+            kept = String(kept.prefix(limit)).trimmingCharacters(in: .whitespaces)
+            truncated = true
+        }
+        return "\u{201C}\(kept)\(truncated ? "\u{2026}" : "")\u{201D}"
+    }
+
+    @objc private func copyLastTranscript() {
+        guard let entry = history.entries.first else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(entry.text, forType: .string)
+        AppLogger.log("copied last transcript to clipboard (\(entry.text.count) chars)")
     }
 
     @objc private func menuToggleRecording() {
@@ -296,12 +351,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openSettings() {
+        showSettings()
+    }
+
+    /// Opens Settings straight to the Models section, for the menu items that
+    /// promise exactly that.
+    @objc private func openModelsSettings() {
+        showSettings(section: .models)
+    }
+
+    /// Passing a section switches an already-open window too, so the menu
+    /// items behave the same whether or not Settings is showing.
+    private func showSettings(section: SettingsSection? = nil) {
+        if let section {
+            settingsNavigator.section = section
+        }
         if let w = settingsWindow {
             NSApp.activate(ignoringOtherApps: true)
             w.makeKeyAndOrderFront(nil)
             return
         }
-        let window = SettingsWindowFactory.make()
+        let window = SettingsWindowFactory.make(navigator: settingsNavigator)
         settingsWindow = window
         NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
@@ -359,7 +429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.state == .recording else { return }
-                AppLogger.log("hit max recording duration (\(Int(Self.maxRecordingSeconds))s) — auto-stopping")
+                AppLogger.log("hit max recording duration (\(Int(Self.maxRecordingSeconds))s), auto-stopping")
                 self.stopAndTranscribe()
             }
         }
@@ -457,6 +527,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+extension AppDelegate: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copyLastTranscript) {
+            return !history.entries.isEmpty
+        }
+        return true
+    }
+}
+
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         if menu === statusItem.menu {
@@ -465,6 +544,7 @@ extension AppDelegate: NSMenuDelegate {
             DownloadedModelsCache.shared.refresh()
             rebuildMicMenu()
             rebuildModelMenu()
+            refreshCopyLastItem()
         } else if menu === micMenu {
             rebuildMicMenu()
         } else if menu === modelMenu {

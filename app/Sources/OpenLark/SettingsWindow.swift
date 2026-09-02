@@ -3,9 +3,16 @@ import KeyboardShortcuts
 import ServiceManagement
 import SwiftUI
 
+/// Lets callers outside the SwiftUI tree pick which section Settings shows,
+/// including when the window is already open.
+@MainActor
+final class SettingsNavigator: ObservableObject {
+    @Published var section: SettingsSection = .general
+}
+
 enum SettingsWindowFactory {
     @MainActor
-    static func make() -> NSWindow {
+    static func make(navigator: SettingsNavigator) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 580),
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
@@ -16,13 +23,13 @@ enum SettingsWindowFactory {
         window.title = "Settings"
         window.isReleasedWhenClosed = false
         window.center()
-        let view = NSHostingView(rootView: SettingsRoot())
+        let view = NSHostingView(rootView: SettingsRoot(navigator: navigator))
         window.contentView = view
         return window
     }
 }
 
-private enum SettingsSection: String, CaseIterable, Identifiable {
+enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case vocabulary = "Vocabulary"
     case models = "Models"
@@ -46,7 +53,9 @@ private enum SettingsSection: String, CaseIterable, Identifiable {
 /// NSWindow doesn't render reliably (sidebar items can vanish, detail can show
 /// transparent), so we hand-roll the split.
 struct SettingsRoot: View {
-    @State private var selection: SettingsSection = .general
+    @ObservedObject var navigator: SettingsNavigator
+
+    private var selection: SettingsSection { navigator.section }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -68,7 +77,7 @@ struct SettingsRoot: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(SettingsSection.allCases) { section in
                 Button {
-                    selection = section
+                    navigator.section = section
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: section.icon)
@@ -147,7 +156,7 @@ private struct GeneralSettingsPane: View {
                     Spacer()
                     KeyboardShortcuts.Recorder(for: .toggleRecording)
                 }
-                Text("Tap the field, then press the keys you want. Pick a combination that doesn't clash with apps you use — modifier + arrow / letter works well.")
+                Text("Tap the field, then press the keys you want. Pick a combination that doesn't clash with apps you use. Modifier + arrow / letter works well.")
                     .settingsHint()
             }
         }
@@ -269,6 +278,7 @@ private struct VocabRow: View {
     let entry: VocabEntry
     @ObservedObject var store: VocabStore
     @State private var hovered = false
+    @State private var deleteHovered = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -289,20 +299,29 @@ private struct VocabRow: View {
                     .frame(minWidth: 120, alignment: .leading)
             }
 
-            if hovered {
-                Button {
-                    store.remove(entry)
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
-                        .frame(width: 20, height: 20)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .opacity(0.8)
+            // Always in the layout, only its opacity changes. Inserting it on
+            // hover reflowed the row (text shifted left, row grew taller).
+            Button {
+                store.remove(entry)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 20, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(deleteHovered ? Color.white.opacity(0.14) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .opacity(hovered ? 0.8 : 0)
+            .allowsHitTesting(hovered)
+            .onHover { deleteHovered = $0 }
+            .help("Remove \(entry.source)")
+            .accessibilityLabel("Remove \(entry.source)")
         }
+        .animation(.easeOut(duration: 0.12), value: hovered)
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
         .background(hovered ? Color.white.opacity(0.04) : Color.clear)
@@ -372,13 +391,13 @@ private struct ModelsSettingsPane: View {
 
                 modelSection(
                     title: "English",
-                    subtitle: "Parakeet — NVIDIA's fastest open speech model. Use these if you only need English.",
+                    subtitle: "Parakeet: NVIDIA's fastest open speech model. Use these if you only need English.",
                     models: ModelRegistry.all.filter { !$0.multilingual }
                 )
 
                 modelSection(
                     title: "Multilingual",
-                    subtitle: "Whisper — supports 99 languages. Pick the languages you speak under the Languages tab.",
+                    subtitle: "Whisper: supports 99 languages. Pick the languages you speak under the Languages tab.",
                     models: ModelRegistry.all.filter { $0.multilingual }
                 )
             }
@@ -390,7 +409,7 @@ private struct ModelsSettingsPane: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Speech model")
                 .font(.system(size: 18, weight: .semibold))
-            Text("OpenLark uses one model at a time. Download more to switch between them — the active one is loaded into memory, the rest sit on disk.")
+            Text("OpenLark uses one model at a time. Download more to switch between them. The active one is loaded into memory, the rest sit on disk.")
                 .settingsHint()
         }
     }
@@ -482,7 +501,7 @@ private struct ModelRow: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("Delete this model — frees ~\(humanSize(mb: model.approxSizeMB))")
+                    .help("Delete this model, frees ~\(humanSize(mb: model.approxSizeMB))")
                 }
             }
         }
@@ -610,7 +629,7 @@ private struct LanguagesSettingsPane: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Languages I speak")
                 .font(.system(size: 18, weight: .semibold))
-            Text("Used only by multilingual models (Whisper). Pick one for fastest, most accurate transcription — or pick a few to let Whisper auto-detect each time.")
+            Text("Used only by multilingual models (Whisper). Pick one for fastest, most accurate transcription, or pick a few to let Whisper auto-detect each time.")
                 .settingsHint()
         }
     }
@@ -715,7 +734,7 @@ private struct LanguagesSettingsPane: View {
         } else {
             selected.remove(code)
         }
-        // Always keep at least one — fall back to English if empty.
+        // Always keep at least one. Fall back to English if empty.
         let codes = selected.isEmpty ? ["en"] : Array(selected)
         UserModelSettings.setSelectedLanguages(codes)
     }
@@ -853,7 +872,7 @@ private struct AboutSettingsPane: View {
             }
 
             SettingsGroup(title: "License") {
-                Text("MIT — free for personal and commercial use.")
+                Text("MIT, free for personal and commercial use.")
                     .font(.system(size: 13))
             }
         }
