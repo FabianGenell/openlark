@@ -112,7 +112,7 @@ final class AudioRecorder: NSObject {
         // Anything quieter usually means another app left the BT headset's HFP
         // route in a half-broken state, or the user spoke too softly.
         if peakDb < -45 {
-            AppLogger.log("⚠ near-silent capture (peak \(String(format: "%.1f", peakDb)) dBFS) — try the built-in mic in System Settings → Sound → Input, or reconnect your Bluetooth headset")
+            AppLogger.log("⚠ near-silent capture (peak \(String(format: "%.1f", peakDb)) dBFS), try the built-in mic in System Settings → Sound → Input, or reconnect your Bluetooth headset")
         }
 
         let outSamples: [Int16]
@@ -204,7 +204,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             sourceSampleRate = sampleRate
             AppLogger.log("incoming asbd: sr=\(sampleRate) ch=\(channels) bits=\(bits) float=\(isFloat) signedInt=\(isSignedInt) interleaved=\(interleaved) bytesPerFrame=\(asbd.mBytesPerFrame)")
         } else if sampleRate != sourceSampleRate {
-            // Format renegotiated mid-stream — record the new rate; resample at stop time.
+            // Format renegotiated mid-stream, record the new rate; resample at stop time.
             AppLogger.log("⚠ format changed mid-stream: sr \(sourceSampleRate) → \(sampleRate)")
             sourceSampleRate = sampleRate
         }
@@ -232,7 +232,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         if isFloat && bits == 32 {
             let floats = UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Float32.self)
             for frame in 0..<frameCount {
-                // For multi-channel input, take channel 0 (or average — let's downmix).
+                // For multi-channel input, take channel 0 (or average, let's downmix).
                 var acc: Float = 0
                 for c in 0..<channels {
                     acc += floats[frame * channels + c]
@@ -265,7 +265,7 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             }
         } else {
             // First time we hit an unknown format, log and bail; samples stay 0.
-            AppLogger.log("unsupported sample format — float=\(isFloat) signedInt=\(isSignedInt) bits=\(bits)")
+            AppLogger.log("unsupported sample format: float=\(isFloat) signedInt=\(isSignedInt) bits=\(bits)")
             return
         }
 

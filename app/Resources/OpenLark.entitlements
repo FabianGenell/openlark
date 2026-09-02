@@ -10,7 +10,7 @@
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
 
-    <!-- Allow unsigned executable memory — needed for some Swift runtime paths. -->
+    <!-- Allow unsigned executable memory, needed for some Swift runtime paths. -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 

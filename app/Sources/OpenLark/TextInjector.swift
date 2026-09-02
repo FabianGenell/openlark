@@ -8,11 +8,11 @@ import AppKit
 ///
 /// Per the spec, the text also remains on the clipboard so the user can ⌘V
 /// again if the auto-paste misses. We do that by NOT restoring if restoration
-/// would lose the transcript — actually we always restore. The user pressing
+/// would lose the transcript. Actually we always restore. The user pressing
 /// ⌘+↑ again before pasting won't lose it because each transcript is fresh.
 ///
 /// Actually the user explicitly wants the text to STAY on the clipboard after
-/// paste — so we skip the restore step.
+/// paste, so we skip the restore step.
 final class TextInjector {
     func inject(text: String) {
         guard !text.isEmpty else { return }

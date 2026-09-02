@@ -1,4 +1,4 @@
-"""Generate OpenLark.icns — black gradient rounded square with white waveform."""
+"""Generate OpenLark.icns: black gradient rounded square with white waveform."""
 from __future__ import annotations
 
 import math
@@ -14,7 +14,7 @@ OUT_DIR = ROOT / "build"
 ICONSET_DIR = OUT_DIR / "Icon.iconset"
 ICNS_PATH = OUT_DIR / "OpenLark.icns"
 
-# macOS app icon set — each size in points, both @1x and @2x.
+# macOS app icon set, each size in points, both @1x and @2x.
 SIZES = [16, 32, 128, 256, 512]
 
 
@@ -99,7 +99,7 @@ def make_icon(size: int) -> Image.Image:
     total_width = bar_count * bar_width + (bar_count - 1) * bar_gap
     start_x = cx - total_width / 2
 
-    # heights — symmetric, taller in middle (typical waveform shape)
+    # heights: symmetric, taller in middle (typical waveform shape)
     height_factors = [0.20, 0.38, 0.55, 0.82, 1.0, 0.82, 0.55, 0.38, 0.20]
     max_height = s * 0.42
 
@@ -130,7 +130,7 @@ def main() -> int:
     ICONSET_DIR.mkdir()
 
     # Render a single big master at 1024x1024 then downscale for crispness,
-    # or render at each native size — we do per-size for sharper small icons.
+    # or render at each native size. We do per-size for sharper small icons.
     for size in SIZES:
         for scale in (1, 2):
             px = size * scale

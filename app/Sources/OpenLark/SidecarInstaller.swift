@@ -33,7 +33,7 @@ final class SidecarInstaller: ObservableObject {
             case .idle: return "Ready"
             case .checking: return "Checking…"
             case .alreadyInstalled: return "Speech engine already installed"
-            case .downloading(let p): return "Downloading speech engine — \(Int(p * 100))%"
+            case .downloading(let p): return "Downloading speech engine: \(Int(p * 100))%"
             case .extracting: return "Extracting…"
             case .registeringDaemon: return "Registering background daemon…"
             case .waitingForSocket: return "Starting daemon…"
@@ -126,7 +126,7 @@ final class SidecarInstaller: ObservableObject {
 
     /// True if a daemon is already serving on the socket. Doesn't care which
     /// installer put it there. A bare file-exists check would falsely report
-    /// healthy when the daemon crashed and left a stale socket — we probe
+    /// healthy when the daemon crashed and left a stale socket. We probe
     /// with a real connect.
     func isDaemonHealthy() -> Bool {
         guard FileManager.default.fileExists(atPath: "/tmp/openlark.sock") else {
@@ -153,7 +153,7 @@ final class SidecarInstaller: ObservableObject {
         if result == 0 {
             return true
         }
-        // Stale socket — daemon dead. Unlink so launchctl load can re-bind cleanly.
+        // Stale socket, daemon dead. Unlink so launchctl load can re-bind cleanly.
         try? FileManager.default.removeItem(atPath: "/tmp/openlark.sock")
         return false
     }
@@ -194,9 +194,9 @@ final class SidecarInstaller: ObservableObject {
             try Task.checkCancellation()
 
             // Always tear down any old daemon when the installed version is
-            // stale — an old server.py can't talk the new wire protocol.
+            // stale. An old server.py can't talk the new wire protocol.
             if !configIsCurrent {
-                AppLogger.log("config version stale — restarting sidecar")
+                AppLogger.log("config version stale, restarting sidecar")
                 _ = try? await runProcess(
                     executable: "/bin/launchctl",
                     arguments: ["unload", launchAgentURL.path],
@@ -252,7 +252,7 @@ final class SidecarInstaller: ObservableObject {
         guard let bundled = Bundle.main.url(forResource: "server", withExtension: "py", subdirectory: "sidecar") else {
             throw NSError(
                 domain: "OpenLark.installer", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "bundled server.py missing — corrupt .app bundle?"]
+                userInfo: [NSLocalizedDescriptionKey: "bundled server.py missing, corrupt .app bundle?"]
             )
         }
         try? FileManager.default.removeItem(at: serverScript)
@@ -277,7 +277,7 @@ final class SidecarInstaller: ObservableObject {
         guard FileManager.default.fileExists(atPath: runtimePython.path) else {
             throw NSError(
                 domain: "OpenLark.installer", code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "runtime layout unexpected — \(runtimePython.path) missing after extract"]
+                userInfo: [NSLocalizedDescriptionKey: "runtime layout unexpected: \(runtimePython.path) missing after extract"]
             )
         }
     }
@@ -316,7 +316,7 @@ final class SidecarInstaller: ObservableObject {
     }
 
     private func loadLaunchAgent() async throws {
-        // Unload any prior version of the agent — older installs from the
+        // Unload any prior version of the agent. Older installs from the
         // shell-script path or previous installer versions may still be
         // registered. Runs off the main thread (via runProcess) with a bounded
         // timeout so a wedged launchctl can't freeze the UI or the install.
@@ -476,7 +476,7 @@ private final class DownloadProgressDelegate: NSObject, URLSessionDownloadDelega
         Task { @MainActor in cb(p) }
     }
 
-    // Required by URLSessionDownloadDelegate but unused — the async download()
+    // Required by URLSessionDownloadDelegate but unused. The async download()
     // variant handles file placement; we just move the returned tempURL.
     func urlSession(
         _ session: URLSession,

@@ -1,8 +1,8 @@
-"""OpenLark inference daemon — multi-model, multi-language.
+"""OpenLark inference daemon: multi-model, multi-language.
 
 Listens on a Unix domain socket. Each connection sends one request and
 receives one or more length-prefixed JSON responses (last response is
-terminal — server closes after it).
+terminal, server closes after it).
 
 Wire format (v2):
   REQUEST:
@@ -24,7 +24,7 @@ Wire format (v2):
     models    ->  { "event": "models", "models": [{ id, downloaded, backend, sizeMB, languages }] }
     any       ->  { "event": "error", "message": "..." }
 
-Only one model is kept loaded at a time — MLX models share GPU memory and
+Only one model is kept loaded at a time. MLX models share GPU memory and
 keeping multiple loaded blows the budget on a 16 GB Mac.
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ import numpy as np
 SOCKET_PATH = os.environ.get("OPENLARK_SOCKET", "/tmp/openlark.sock")
 HEADER = struct.Struct(">I")
 SOCKET_TIMEOUT_S = 30.0
-PREFETCH_TIMEOUT_S = 30 * 60  # 30 min — large Whisper models can take a while on slow links
+PREFETCH_TIMEOUT_S = 30 * 60  # 30 min, large Whisper models can take a while on slow links
 MAX_PAYLOAD_BYTES = 200 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def _watchdog_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Model registry — Python side
+# Model registry, Python side
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -197,8 +197,8 @@ def load_model(model_id: str) -> Any:
         from parakeet_mlx import from_pretrained
         _current_model = ("parakeet", from_pretrained(spec.repo))
     elif spec.backend == "whisper":
-        # mlx-whisper transcribes via a top-level call that loads on demand —
-        # the "model" we cache is just the repo string. mlx_whisper caches
+        # mlx-whisper transcribes via a top-level call that loads on demand.
+        # The "model" we cache is just the repo string. mlx_whisper caches
         # the loaded weights internally per process.
         import mlx_whisper  # noqa: F401  (verify dep is present)
         _current_model = ("whisper", spec.repo)
@@ -304,13 +304,13 @@ def transcribe(model_id: str, languages: list[str], audio: np.ndarray, sr: int) 
 def delete_model(model_id: str) -> None:
     """Remove a model from the HuggingFace cache.
 
-    Refuses to delete the currently-loaded model — caller must switch first.
+    Refuses to delete the currently-loaded model. Caller must switch first.
     """
     global _current_model_id, _current_model
     spec = MODELS[model_id]
 
     if _current_model_id == model_id:
-        # Unload first — Python keeps file handles on .safetensors that
+        # Unload first. Python keeps file handles on .safetensors that
         # block rmtree on some systems.
         _current_model = None
         _current_model_id = None
@@ -483,7 +483,7 @@ class Handler(socketserver.BaseRequestHandler):
             send_frame(sock, {"event": "error", "message": f"unknown cmd: {cmd}"})
 
         except socket.timeout:
-            log("client timed out — dropping connection")
+            log("client timed out, dropping connection")
         except Exception as exc:
             log(f"handler error: {exc}\n{traceback.format_exc()}")
             try:
@@ -495,7 +495,7 @@ class Handler(socketserver.BaseRequestHandler):
 
 
 class UnixStreamServer(socketserver.UnixStreamServer):
-    # Single-threaded by design — MLX binds GPU streams to the loading thread.
+    # Single-threaded by design. MLX binds GPU streams to the loading thread.
     allow_reuse_address = True
 
 

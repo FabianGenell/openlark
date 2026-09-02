@@ -52,7 +52,7 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
 
           # Import the .p12 and authorise codesign to use it without a UI prompt.
-          # We do NOT call `security add-trusted-cert` — it can hang on a
+          # We do NOT call `security add-trusted-cert`. It can hang on a
           # non-interactive runner waiting for an admin auth prompt. codesign
           # doesn't actually need the cert to be trust-policy-listed; the
           # build.sh script falls back to `find-identity -v` (no policy filter)

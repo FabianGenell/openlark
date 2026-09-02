@@ -2,8 +2,8 @@ import Foundation
 import Combine
 
 /// A vocabulary entry. If `replacement` is nil this is a "preserve casing" word
-/// (e.g. "Heltra" — when Parakeet returns "heltra" we want to fix the case).
-/// If `replacement` is set this is a snippet — "weboo" → "webbu" — replace
+/// (e.g. "Heltra", when Parakeet returns "heltra" we want to fix the case).
+/// If `replacement` is set this is a snippet, "weboo" → "webbu", replace
 /// the source token verbatim with the replacement.
 struct VocabEntry: Codable, Identifiable, Hashable {
     var id: String { source }

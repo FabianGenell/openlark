@@ -51,6 +51,6 @@ security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$CERT" 2>/dev/null || true
 if security find-identity -p codesigning -v 2>/dev/null | grep -q "$IDENTITY_NAME"; then
     echo "✓ identity '$IDENTITY_NAME' is ready"
 else
-    echo "✗ identity import failed — falling back to ad-hoc signing"
+    echo "✗ identity import failed, falling back to ad-hoc signing"
     exit 1
 fi

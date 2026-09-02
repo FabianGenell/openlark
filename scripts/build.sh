@@ -41,7 +41,7 @@ cp "$ROOT_DIR/sidecar/server.py" "$APP_BUNDLE/Contents/Resources/sidecar/server.
 
 echo "› codesigning…"
 # Identity priority:
-#   1. $SIGNING_IDENTITY env var (used by CI — "OpenLark Release")
+#   1. $SIGNING_IDENTITY env var (used by CI, "OpenLark Release")
 #   2. local "OpenLark Dev" cert (created by setup-signing-identity.sh)
 #   3. ad-hoc, with a warning
 #
@@ -62,7 +62,7 @@ if security find-identity "${FIND_FLAGS[@]}" 2>/dev/null | grep -q "$IDENTITY_NA
         --identifier app.openlark.OpenLark \
         --sign "$IDENTITY_NAME" "$APP_BUNDLE"
 else
-    echo "  (ad-hoc — for stable TCC permissions, run scripts/setup-signing-identity.sh once)"
+    echo "  (ad-hoc, for stable TCC permissions run scripts/setup-signing-identity.sh once)"
     codesign --force --deep --options runtime \
         --entitlements "$ENTITLEMENTS" \
         --identifier app.openlark.OpenLark --sign - "$APP_BUNDLE"

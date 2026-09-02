@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The menu bar dropdown needs this synchronously when it opens (to build
 /// the "Model" submenu showing only downloaded models). Querying the sidecar
-/// every time the menu opens would race the menu open — instead we keep a
+/// every time the menu opens would race the menu open, so instead we keep a
 /// cached set and refresh on app launch + after every download/delete from
 /// the Settings UI.
 @MainActor
@@ -23,7 +23,7 @@ final class DownloadedModelsCache: ObservableObject {
         ModelRegistry.all.filter { downloadedIds.contains($0.id) }
     }
 
-    /// Trigger a background refresh. Idempotent — coalesces concurrent calls.
+    /// Trigger a background refresh. Idempotent, coalesces concurrent calls.
     func refresh() {
         if refreshTask != nil { return }
         refreshTask = Task {

@@ -33,7 +33,7 @@ final class EscEventTap: @unchecked Sendable {
             },
             userInfo: selfPtr
         ) else {
-            AppLogger.log("CGEvent.tapCreate failed — accessibility permission missing? See README for fix.")
+            AppLogger.log("CGEvent.tapCreate failed, accessibility permission missing? See README for fix.")
             return
         }
 
@@ -48,7 +48,7 @@ final class EscEventTap: @unchecked Sendable {
             self.runLoopSource = source
             lock.unlock()
         } else {
-            // Lost the race — tear down the duplicate we just built.
+            // Lost the race, tear down the duplicate we just built.
             lock.unlock()
             CGEvent.tapEnable(tap: newTap, enable: false)
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)

@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Horizontal card showing four usage metrics. Matches the layout shown in the
-/// project screenshot — 4 columns, big number on top, soft label below.
+/// project screenshot: 4 columns, big number on top, soft label below.
 struct StatsCard: View {
     let stats: UsageStats
 

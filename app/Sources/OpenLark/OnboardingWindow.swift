@@ -113,7 +113,7 @@ private struct OnboardingView: View {
             step = .hotkey
             // Mark onboarding as seen the moment the user reaches the hotkey
             // step. Permissions + engine are the only things the app actually
-            // needs to function — the hotkey defaults to ⌘↑ even if this step
+            // needs to function. The hotkey defaults to ⌘↑ even if this step
             // is skipped or crashes. Setting the flag here prevents the
             // infinite-onboarding loop if anything goes wrong from this point
             // on (e.g. the KeyboardShortcuts recorder failing under app
@@ -187,7 +187,7 @@ private struct PermissionsStep: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Grant a few permissions")
                     .font(.system(size: 22, weight: .semibold))
-                Text("Click each button. The first shows a macOS prompt; the other two open System Settings — toggle the OpenLark switch on.")
+                Text("Click each button. The first shows a macOS prompt; the other two open System Settings. Toggle the OpenLark switch on.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -206,7 +206,7 @@ private struct PermissionsStep: View {
                 PermissionRow(
                     title: "Accessibility",
                     subtitle: "Paste transcribed text into the focused app.",
-                    helper: "System Settings will open — toggle the OpenLark switch on.",
+                    helper: "System Settings will open. Toggle the OpenLark switch on.",
                     icon: "hand.point.up.left.fill",
                     buttonLabel: "Open Settings",
                     granted: accessibilityGranted,
@@ -215,7 +215,7 @@ private struct PermissionsStep: View {
                 PermissionRow(
                     title: "Input Monitoring",
                     subtitle: "Catch the Esc key globally while recording.",
-                    helper: "System Settings will open — toggle the OpenLark switch on.",
+                    helper: "System Settings will open. Toggle the OpenLark switch on.",
                     icon: "keyboard.fill",
                     buttonLabel: "Open Settings",
                     granted: inputMonitoringGranted,
@@ -254,7 +254,7 @@ private struct PermissionsStep: View {
         if status == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         } else if status == .denied || status == .restricted {
-            // Already denied at the system level — only System Settings can flip it.
+            // Already denied at the system level. Only System Settings can flip it.
             open("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         }
         // status == .authorized: poll will pick it up
@@ -326,7 +326,7 @@ private struct EngineStep: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Speech engine")
                     .font(.system(size: 22, weight: .semibold))
-                Text("One-time setup — about 180 MB.")
+                Text("One-time setup, about 180 MB.")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
             }
@@ -375,7 +375,7 @@ private struct EngineStep: View {
             Spacer()
         }
         .onAppear {
-            // App launched with onboarding open and no daemon — make sure the
+            // App launched with onboarding open and no daemon. Make sure the
             // installer is running. ensureRunning() is idempotent.
             installer.ensureRunning()
         }
@@ -446,7 +446,7 @@ private struct DoneStep: View {
             Text("You're set")
                 .font(.system(size: 26, weight: .semibold))
 
-            Text("Try it now — go to any text field, press your hotkey, dictate a sentence, press it again. The text will appear at your cursor and on the clipboard.")
+            Text("Try it now. Go to any text field, press your hotkey, dictate a sentence, press it again. The text will appear at your cursor and on the clipboard.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -454,7 +454,7 @@ private struct DoneStep: View {
                 .padding(.horizontal, 8)
 
             VStack(alignment: .leading, spacing: 8) {
-                tip(icon: "menubar.arrow.up.rectangle", text: "OpenLark lives in the menu bar — click the waveform icon for History, Settings, and Vocabulary.")
+                tip(icon: "menubar.arrow.up.rectangle", text: "OpenLark lives in the menu bar. Click the waveform icon for History, Settings, and Vocabulary.")
                 tip(icon: "text.book.closed", text: "Add custom words and snippets in Settings → Vocabulary for things the model gets wrong.")
                 tip(icon: "command.square", text: "Change the hotkey any time from Settings → General.")
             }

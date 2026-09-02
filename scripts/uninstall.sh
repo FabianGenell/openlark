@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fully remove OpenLark from the system.
-# Leaves the project source tree alone — only touches user data.
+# Leaves the project source tree alone, only touches user data.
 
 set -euo pipefail
 

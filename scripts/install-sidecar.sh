@@ -3,7 +3,7 @@
 # as a LaunchAgent so it boots with the user and stays resident.
 #
 # Run this after downloading the .app from a release. The .app itself
-# doesn't bundle Python — the daemon lives in this repo.
+# doesn't bundle Python, the daemon lives in this repo.
 
 set -euo pipefail
 

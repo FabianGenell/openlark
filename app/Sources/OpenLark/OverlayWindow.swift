@@ -18,7 +18,7 @@ final class OverlayWindowController {
         model.isProcessing = false
         ensureWindow()
         guard let window else {
-            AppLogger.log("overlay show: window nil after ensureWindow — fatal")
+            AppLogger.log("overlay show: window nil after ensureWindow, fatal")
             return
         }
         // Re-assert level + collection behavior on each show. Some apps (Loom,
@@ -61,7 +61,7 @@ final class OverlayWindowController {
         // Window is intentionally larger than the visible pill so the SwiftUI
         // drop-shadow has room to render. macOS's own window shadow (hasShadow)
         // draws a rectangular shadow around the bounding box, ignoring the
-        // rounded-corner mask — so we disable it and rely on the SwiftUI shadow.
+        // rounded-corner mask, so we disable it and rely on the SwiftUI shadow.
         let panel = DraggablePanel(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 144),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -74,7 +74,7 @@ final class OverlayWindowController {
         panel.level = .screenSaver
         // .canJoinAllSpaces is enough to make the panel appear on every Space
         // the user switches to. .moveToActiveSpace + .stationary contradict it
-        // and cause macOS to silently pick one — usually leaving the overlay
+        // and cause macOS to silently pick one, usually leaving the overlay
         // stranded on the Space where it was first shown.
         panel.collectionBehavior = [
             .canJoinAllSpaces,
@@ -146,7 +146,7 @@ final class OverlayWindowController {
     }
 
     /// Returns the screen whose `visibleFrame` fully contains the given rect,
-    /// if any. Stricter than `intersects` — a saved origin from a now-disconnected
+    /// if any. Stricter than `intersects`. A saved origin from a now-disconnected
     /// display can technically intersect a remaining screen while being mostly
     /// off-screen, which is what caused the v0.2.0 "overlay never appears" bug.
     private func screenFullyContaining(_ rect: NSRect) -> NSScreen? {
@@ -169,7 +169,7 @@ final class DraggablePanel: NSPanel {
         let local = content.convert(event.locationInWindow, from: nil)
         let pill = content.bounds.insetBy(dx: pillInset, dy: pillInset)
         guard pill.contains(local) else {
-            // Click on the shadow gutter — ignore (don't drag, don't pass through).
+            // Click on the shadow gutter, ignore (don't drag, don't pass through).
             return
         }
         performDrag(with: event)
@@ -208,8 +208,8 @@ final class OverlayModel: ObservableObject {
 
     private func startRecordingTimer() {
         timer?.invalidate()
-        // Timer callbacks fire on the main run loop, which is the main actor —
-        // assumeIsolated is safe here and avoids a Task hop per frame.
+        // Timer callbacks fire on the main run loop, which is the main actor,
+        // so assumeIsolated is safe here and avoids a Task hop per frame.
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -231,7 +231,7 @@ final class OverlayModel: ObservableObject {
                 self.processingPhase += 0.14
                 let count = self.levels.count
                 var next = [Float](repeating: 0, count: count)
-                // Two travelling sine waves crossed — gentle "thinking" pulse.
+                // Two travelling sine waves crossed, a gentle "thinking" pulse.
                 for i in 0..<count {
                     let pos = Double(i) / Double(max(1, count - 1))
                     let wave = sin(self.processingPhase + pos * .pi * 2.6)

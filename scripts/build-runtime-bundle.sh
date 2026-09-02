@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the OpenLark runtime bundle — a self-contained, relocatable Python
+# Builds the OpenLark runtime bundle, a self-contained, relocatable Python
 # tree pre-populated with parakeet-mlx + mlx + numpy wheels.
 #
 # Output: build/openlark-runtime-arm64-darwin.tar.gz
@@ -38,11 +38,11 @@ curl -fL "$PYTHON_URL" -o "$WORK_DIR/python.tar.gz"
 echo "› extracting…"
 tar -xzf "$WORK_DIR/python.tar.gz" -C "$WORK_DIR"
 rm "$WORK_DIR/python.tar.gz"
-# Tarball extracts to $WORK_DIR/python/ — that's our runtime root.
+# Tarball extracts to $WORK_DIR/python/, which is our runtime root.
 
 PYTHON="$WORK_DIR/python/bin/python3.13"
 if [ ! -x "$PYTHON" ]; then
-    echo "✗ python-build-standalone layout changed — $PYTHON missing"
+    echo "✗ python-build-standalone layout changed, $PYTHON missing"
     exit 1
 fi
 

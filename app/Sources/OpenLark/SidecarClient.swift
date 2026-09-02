@@ -158,8 +158,8 @@ actor SidecarClient {
 
     // MARK: - Prefetch (download a model without transcribing)
 
-    /// Streams progress events. `progress` callback fires on the actor thread —
-    /// hop to MainActor inside if you need to update UI.
+    /// Streams progress events. `progress` callback fires on the actor thread.
+    /// Hop to MainActor inside if you need to update UI.
     func prefetch(
         modelId: String,
         onProgress: @escaping (Double) -> Void

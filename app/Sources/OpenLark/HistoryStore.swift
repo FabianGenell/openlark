@@ -6,7 +6,7 @@ struct TranscriptEntry: Codable, Identifiable, Hashable {
     let timestamp: Date
     let durationSeconds: Double
     /// Frontmost-app name at the moment the recording was completed, if known.
-    /// Optional for backward-compat — entries created before this field will decode as nil.
+    /// Optional for backward-compat, entries created before this field decode as nil.
     let appName: String?
 
     init(
@@ -28,7 +28,7 @@ struct TranscriptEntry: Codable, Identifiable, Hashable {
     }
 }
 
-/// Derived usage statistics — computed from the entries list.
+/// Derived usage statistics, computed from the entries list.
 struct UsageStats: Equatable {
     /// Average dictation speed across all-time history, in words per minute.
     let averageWPM: Double

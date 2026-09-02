@@ -13,7 +13,7 @@ struct Language: Identifiable, Hashable, Sendable {
 enum LanguageCatalog {
     /// The most common Whisper-supported languages. Ordered roughly by
     /// global usage / likely-relevance for users picking a few. Whisper
-    /// supports ~99 — we surface a curated subset to keep the picker sane.
+    /// supports ~99, so we surface a curated subset to keep the picker sane.
     static let all: [Language] = [
         .init(code: "en", name: "English",    nativeName: "English"),
         .init(code: "sv", name: "Swedish",    nativeName: "Svenska"),

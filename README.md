@@ -12,7 +12,7 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
 - **Custom vocabulary.** Per-user list of words and snippets (`weboo → webbu`). Forces canonical casing and fixes near-miss phonetic mistakes.
 - **History.** Last 50 transcriptions, searchable, click-to-copy or click-to-repaste.
 - **Usage stats.** Average WPM, words this week, distinct apps you've dictated into, estimated time saved vs typing at 40 WPM.
-- **Unified Settings.** Sidebar layout — General, Vocabulary, Models, About.
+- **Unified Settings.** Sidebar layout: General, Vocabulary, Models, About.
 - **Native menu-bar app.** Borderless overlay with live waveform, draggable, position persists. Stays above fullscreen apps; follows you across Spaces.
 - **No telemetry.** Open source. MIT licensed.
 
@@ -23,7 +23,7 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
 - [`uv`](https://github.com/astral-sh/uv) for the Python sidecar
 - Python 3.11+ (uv will fetch this for you)
 
-> ⚠ `ffmpeg` is **no longer required** as of v0.2.0 — the sidecar decodes WAV in Python and feeds the model directly.
+> ⚠ `ffmpeg` is **no longer required** as of v0.2.0. The sidecar decodes WAV in Python and feeds the model directly.
 
 ## Install
 
@@ -37,7 +37,7 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
    - Background daemon registration
 4. Press your hotkey (default `⌘+↑`) and dictate.
 
-That's it — no `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~600 MB Parakeet model from HuggingFace (~3 min on typical broadband).
+That's it. No `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~600 MB Parakeet model from HuggingFace (~3 min on typical broadband).
 
 ### From source
 
@@ -64,16 +64,16 @@ Output is auto-pasted into the focused text field and also kept on the clipboard
 
 The menu bar icon gives you:
 
-- **History…** — last 50 transcriptions with stats card on top
-- **Settings…** — General (launch at login, hotkey), Vocabulary, Models, About
+- **History…** last 50 transcriptions with stats card on top
+- **Settings…** General (launch at login, hotkey), Vocabulary, Models, About
 - **Quit OpenLark**
 
 ### Vocabulary
 
 Two entry types:
 
-- **Plain word** (e.g. `GitHub`) — forces canonical casing on matches and rescues near-miss phonetic mistakes ("hithub" → "GitHub").
-- **Snippet** (e.g. `weboo → webbu`) — verbatim text replacement.
+- **Plain word** (e.g. `GitHub`) forces canonical casing on matches and rescues near-miss phonetic mistakes ("hithub" → "GitHub").
+- **Snippet** (e.g. `weboo → webbu`) does verbatim text replacement.
 
 Stored at `~/Library/Application Support/OpenLark/vocab.json`.
 
@@ -81,10 +81,10 @@ Stored at `~/Library/Application Support/OpenLark/vocab.json`.
 
 Visible in the Settings → General pane and at the top of History:
 
-- **Average speed** — lifetime dictation WPM
-- **Words this week** — total words across the last 7 days
-- **Apps used** — distinct apps you've dictated into this week
-- **Saved this week** — estimated minutes saved vs typing at 40 WPM
+- **Average speed.** Lifetime dictation WPM
+- **Words this week.** Total words across the last 7 days
+- **Apps used.** Distinct apps you've dictated into this week
+- **Saved this week.** Estimated minutes saved vs typing at 40 WPM
 
 ## Architecture
 
@@ -101,13 +101,13 @@ Visible in the Settings → General pane and at the top of History:
 
 - The Swift app captures mic input at 16 kHz mono Int16, encodes a WAV, and sends it over a Unix socket.
 - The Python daemon runs `parakeet-mlx`, returns the transcription, and the Swift app post-processes against the vocab list before pasting.
-- The daemon is kept alive by a `launchd` LaunchAgent — boots with you and the first request hits a warm model (~3 s startup from disk cache).
+- The daemon is kept alive by a `launchd` LaunchAgent, so it boots with you and the first request hits a warm model (~3 s startup from disk cache).
 
 ## File layout
 
 ```
 openlark/
-├── app/                       # Swift Package — the menu bar app
+├── app/                       # Swift Package, the menu bar app
 │   ├── Package.swift
 │   └── Sources/OpenLark/
 ├── sidecar/                   # Python inference daemon
@@ -158,7 +158,7 @@ Bumps `CFBundleShortVersionString` + `CFBundleVersion` in `Info.plist`, commits,
 
 - **English only.** Parakeet TDT 0.6B v2 is English-only. Swap-in for `mlx-whisper` is on the roadmap.
 - **Apple Silicon only.** The MLX backend doesn't run on Intel Macs.
-- **Bluetooth headset HFP route.** Some Bluetooth headsets advertise a mic but don't actually deliver audio (silent zero samples). If transcription comes back empty, the app log will show `peak=0` — switch to the built-in mic in System Settings → Sound → Input as a fallback.
+- **Bluetooth headset HFP route.** Some Bluetooth headsets advertise a mic but don't actually deliver audio (silent zero samples). If transcription comes back empty, the app log will show `peak=0`. Switch to the built-in mic in System Settings → Sound → Input as a fallback.
 
 ## License
 

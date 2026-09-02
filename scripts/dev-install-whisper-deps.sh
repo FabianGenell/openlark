@@ -35,4 +35,4 @@ rm -f /tmp/openlark.sock
 rm -f "$HOME/Library/Application Support/OpenLark/.installed-version"
 
 echo ""
-echo "✓ deps installed. Now relaunch OpenLark.app — it'll reinstall the daemon."
+echo "✓ deps installed. Now relaunch OpenLark.app, it'll reinstall the daemon."

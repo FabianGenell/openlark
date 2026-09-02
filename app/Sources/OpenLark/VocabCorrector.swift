@@ -16,7 +16,7 @@ enum VocabCorrector {
 
         var result = text
 
-        // Step 1 — explicit snippet replacements (multi-word OK).
+        // Step 1: explicit snippet replacements (multi-word OK).
         // Sort by source length descending so longer matches win first.
         let snippets = entries
             .filter { $0.isSnippet }
@@ -25,13 +25,13 @@ enum VocabCorrector {
             result = replaceTokenCaseInsensitive(in: result, from: entry.source, to: entry.canonical)
         }
 
-        // Step 2 — casing fixup for plain entries.
+        // Step 2: casing fixup for plain entries.
         let plain = entries.filter { !$0.isSnippet }
         for entry in plain {
             result = replaceTokenCaseInsensitive(in: result, from: entry.source, to: entry.canonical)
         }
 
-        // Step 3 — fuzzy match for any remaining tokens.
+        // Step 3: fuzzy match for any remaining tokens.
         result = fuzzyReplace(in: result, against: plain.map(\.canonical))
 
         return result
@@ -98,7 +98,7 @@ enum VocabCorrector {
         for (canonical, key, canonicalLower) in entries {
             if tokenLower == canonicalLower { return nil } // already correct
             guard !key.isEmpty, !tokenKey.isEmpty else { continue }
-            // require same first letter — avoids "node" matching "code"
+            // require same first letter, avoids "node" matching "code"
             if tokenLower.first != canonicalLower.first { continue }
             let lenDiff = abs(tokenLower.count - canonicalLower.count)
             if lenDiff > 3 { continue }

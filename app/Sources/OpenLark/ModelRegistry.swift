@@ -15,7 +15,7 @@ struct ModelDescriptor: Identifiable, Hashable, Sendable {
 }
 
 enum ModelRegistry {
-    /// The shipped catalog. Order matters — this is the order shown in
+    /// The shipped catalog. Order matters. This is the order shown in
     /// Settings → Models.
     static let all: [ModelDescriptor] = [
         ModelDescriptor(
@@ -25,7 +25,7 @@ enum ModelRegistry {
             approxSizeMB: 600,
             multilingual: false,
             speedLabel: "Fastest",
-            summary: "English-only. NVIDIA's TDT 0.6B — ~25× realtime on Apple Silicon.",
+            summary: "English-only. NVIDIA's TDT 0.6B, ~25× realtime on Apple Silicon.",
             recommendedDefault: true
         ),
         ModelDescriptor(
@@ -45,7 +45,7 @@ enum ModelRegistry {
             approxSizeMB: 1100,
             multilingual: false,
             speedLabel: "Fast",
-            summary: "English-only. Larger Parakeet — better on long/technical speech.",
+            summary: "English-only. Larger Parakeet, better on long/technical speech.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -65,7 +65,7 @@ enum ModelRegistry {
             approxSizeMB: 3100,
             multilingual: true,
             speedLabel: "Best quality",
-            summary: "Multilingual. Highest accuracy — slower than turbo, bigger download.",
+            summary: "Multilingual. Highest accuracy. Slower than turbo, bigger download.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -85,7 +85,7 @@ enum ModelRegistry {
             approxSizeMB: 500,
             multilingual: true,
             speedLabel: "Fast",
-            summary: "Multilingual. Smallest multilingual option — quick downloads.",
+            summary: "Multilingual. Smallest multilingual option, quick downloads.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -95,7 +95,7 @@ enum ModelRegistry {
             approxSizeMB: 1500,
             multilingual: false,
             speedLabel: "Fast",
-            summary: "English-only distillation of Whisper Large — very fast.",
+            summary: "English-only distillation of Whisper Large, very fast.",
             recommendedDefault: false
         ),
     ]

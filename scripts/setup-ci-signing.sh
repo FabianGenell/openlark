@@ -17,7 +17,7 @@
 ###############################################################################
 #
 # Generates a stable self-signed code-signing identity for the CI release
-# workflow. Output: base64-encoded PKCS12 + password — paste these into
+# workflow. Output: base64-encoded PKCS12 + password. Paste these into
 # the repo's GitHub Actions secrets as RELEASE_P12_BASE64 and RELEASE_P12_PASSWORD.
 #
 # The CI workflow imports the .p12 on every build, so every released
@@ -25,7 +25,7 @@
 # accessibility / input-monitoring grants across version updates.
 #
 # This identity is separate from the local "OpenLark Dev" cert created by
-# scripts/setup-signing-identity.sh — the dev cert is per-machine; this one
+# scripts/setup-signing-identity.sh. The dev cert is per-machine; this one
 # is shared by every release artifact.
 
 set -euo pipefail
@@ -47,7 +47,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -addext "keyUsage=critical,digitalSignature" \
     -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
 
-# Legacy PKCS12 encryption — required by macOS `security import`.
+# Legacy PKCS12 encryption, required by macOS `security import`.
 openssl pkcs12 -export -inkey "$KEY" -in "$CERT" \
     -out "$P12" -passout "pass:$P12_PW" \
     -legacy -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
@@ -73,7 +73,7 @@ If you can use \`gh\`, run these instead:
   gh secret set RELEASE_P12_BASE64 --body "$P12_BASE64"
 
 Future runs of the GitHub Actions Release workflow will import this identity
-into a temporary keychain and use it to sign OpenLark.app — every release
+into a temporary keychain and use it to sign OpenLark.app. Every release
 will share the same code-directory hash, so users keep their macOS
 permission grants across updates.
 EOF

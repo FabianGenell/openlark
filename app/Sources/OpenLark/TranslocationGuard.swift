@@ -5,8 +5,8 @@ import Security
 // macOS routes quarantined apps through a read-only path under
 // /private/var/folders/.../AppTranslocation/<uuid>/d/. Swift Package Manager's
 // `Bundle.module` accessor fails to resolve the resource bundle from that
-// path, which makes any SPM library that uses `Bundle.module` crash on init —
-// for us that's KeyboardShortcuts.RecorderCocoa, which hits an assertion
+// path, which makes any SPM library that uses `Bundle.module` crash on init.
+// For us that's KeyboardShortcuts.RecorderCocoa, which hits an assertion
 // failure during the onboarding hotkey step and takes the whole app down.
 //
 // Without Apple Developer ID notarization we can't prevent the OS from
