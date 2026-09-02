@@ -114,8 +114,13 @@ final class SidecarInstaller: ObservableObject {
     var installedVersionURL: URL {
         supportRoot.appendingPathComponent(".installed-version", isDirectory: false)
     }
-    /// v3 = multi-model JSON-header protocol + mlx-whisper dep
-    ///      (HF_HOME was tried in v2; reverted to default to keep existing caches).
+    /// v3 = multi-model JSON-header protocol + mlx-whisper dep.
+    ///      Deliberately no HF_HOME: the daemon uses the default
+    ///      ~/.cache/huggingface, which is shared with every other MLX tool on
+    ///      the machine, so a model downloaded once is not downloaded again per
+    ///      app. Pointing HF_HOME at our own Application Support directory was
+    ///      tried locally during development and orphaned a full duplicate of
+    ///      the active model. It was never committed or shipped. Do not add it.
     /// v4 = hang-hardened daemon: socket binds before model load, startup
     ///      watchdog, fail-fast on missing model, prefetch heartbeats. Bumped so
     ///      existing installs get the new server.py + restart on next launch.

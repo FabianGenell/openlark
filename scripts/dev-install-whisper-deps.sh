@@ -31,7 +31,7 @@ launchctl unload "$HOME/Library/LaunchAgents/app.openlark.sidecar.plist" 2>/dev/
 rm -f /tmp/openlark.sock
 
 # Drop the installed-version marker so the next app launch forces a reinstall
-# (writes the new plist with HF_HOME, copies the new server.py, reloads launchd).
+# (writes the new plist, copies the new server.py, reloads launchd).
 rm -f "$HOME/Library/Application Support/OpenLark/.installed-version"
 
 echo ""
