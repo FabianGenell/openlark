@@ -9,14 +9,16 @@ struct StatsCard: View {
         HStack(spacing: 0) {
             stat(value: "\(Int(stats.averageWPM.rounded()))", unit: "WPM", label: "Average speed")
             divider
-            stat(value: formattedWords, unit: nil, label: "Words this week")
+            stat(value: formatted(stats.wordsThisWeek), unit: nil, label: "Words this week")
             divider
-            stat(value: "\(stats.appsUsedThisWeek)", unit: nil, label: "Apps used")
+            stat(value: formatted(stats.wordsAllTime), unit: nil, label: "Words all time")
             divider
-            stat(value: formattedTimeSaved, unit: nil, label: "Saved this week")
+            stat(value: duration(stats.timeSavedThisWeek), unit: nil, label: "Saved this week")
+            divider
+            stat(value: duration(stats.timeSavedAllTime), unit: nil, label: "Saved all time")
         }
         .padding(.vertical, 20)
-        .padding(.horizontal, 22)
+        .padding(.horizontal, 18)
         .themeCard(radius: Theme.radiusLarge)
     }
 
@@ -32,24 +34,32 @@ struct StatsCard: View {
         Rectangle()
             .fill(Color.white.opacity(0.12))
             .frame(width: 1, height: 32)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 5)
     }
 
     private func stat(value: String, unit: String?, label: String) -> some View {
         VStack(alignment: .center, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value)
-                    .font(.system(size: 24, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(Theme.text)
                 if let unit {
                     Text(unit)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.textSecondary)
                 }
             }
+            // Five columns are tight in Settings at its 740pt minimum width.
+            // Shrink rather than wrap: a value broken across two lines throws
+            // the whole row's baseline out.
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+
             Text(label)
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         // Centred, not leading. Left-aligning inside equal-width columns left
         // dead space to the right of every label, so each rule read as though
@@ -58,15 +68,14 @@ struct StatsCard: View {
         .frame(maxWidth: .infinity, alignment: .center)
     }
 
-    private var formattedWords: String {
+    private func formatted(_ count: Int) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         formatter.groupingSeparator = ","
-        return formatter.string(from: NSNumber(value: stats.wordsThisWeek)) ?? "0"
+        return formatter.string(from: NSNumber(value: count)) ?? "0"
     }
 
-    private var formattedTimeSaved: String {
-        let total = stats.timeSavedThisWeek
+    private func duration(_ total: TimeInterval) -> String {
         if total < 60 {
             return "\(Int(total))s"
         }
