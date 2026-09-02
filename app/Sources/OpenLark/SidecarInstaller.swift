@@ -119,7 +119,12 @@ final class SidecarInstaller: ObservableObject {
     /// v4 = hang-hardened daemon: socket binds before model load, startup
     ///      watchdog, fail-fast on missing model, prefetch heartbeats. Bumped so
     ///      existing installs get the new server.py + restart on next launch.
-    private let currentInstalledVersion = "4"
+    /// v5 = model registry changes: Parakeet v3 marked multilingual, corrected
+    ///      Parakeet download sizes, plus parakeet-tdt-ctc-110m and
+    ///      whisper-large-v3-turbo-q4. The running daemon resolves model ids
+    ///      from its own copy of server.py, so without this bump the two new
+    ///      ids come back as "unknown model id".
+    private let currentInstalledVersion = "5"
 
     private var isRunning = false
     private var installTask: Task<Void, Never>?

@@ -134,14 +134,20 @@ class ModelSpec:
 
 MODELS: dict[str, ModelSpec] = {
     spec.id: spec for spec in [
-        ModelSpec("parakeet-tdt-0.6b-v2",     "mlx-community/parakeet-tdt-0.6b-v2",       "parakeet",   600,  False),
-        ModelSpec("parakeet-tdt-0.6b-v3",     "mlx-community/parakeet-tdt-0.6b-v3",       "parakeet",   600,  False),
-        ModelSpec("parakeet-tdt-1.1b",        "mlx-community/parakeet-tdt-1.1b",          "parakeet",  1100,  False),
-        ModelSpec("whisper-large-v3-turbo",   "mlx-community/whisper-large-v3-turbo",     "whisper",   1600,  True),
-        ModelSpec("whisper-large-v3",         "mlx-community/whisper-large-v3-mlx",       "whisper",   3100,  True),
-        ModelSpec("whisper-medium",           "mlx-community/whisper-medium-mlx",         "whisper",   1500,  True),
-        ModelSpec("whisper-small",            "mlx-community/whisper-small-mlx",          "whisper",    500,  True),
-        ModelSpec("distil-whisper-large-v3",  "mlx-community/distil-whisper-large-v3",    "whisper",   1500,  False),
+        # size_mb is the real download size (single fp32 safetensors for the
+        # Parakeet repos), not the parameter count.
+        ModelSpec("parakeet-tdt-0.6b-v3",         "mlx-community/parakeet-tdt-0.6b-v3",         "parakeet",  2508,  True),
+        ModelSpec("parakeet-tdt-0.6b-v2",         "mlx-community/parakeet-tdt-0.6b-v2",         "parakeet",  2472,  False),
+        ModelSpec("parakeet-tdt-ctc-110m",        "mlx-community/parakeet-tdt_ctc-110m",        "parakeet",   459,  False),
+        ModelSpec("parakeet-tdt-1.1b",            "mlx-community/parakeet-tdt-1.1b",            "parakeet",  4282,  False),
+        ModelSpec("whisper-large-v3-turbo",       "mlx-community/whisper-large-v3-turbo",       "whisper",   1614,  True),
+        # The "-4bit" repo ships model.safetensors, which mlx-whisper cannot
+        # load; it wants weights.npz / weights.safetensors. "-q4" has that.
+        ModelSpec("whisper-large-v3-turbo-q4",    "mlx-community/whisper-large-v3-turbo-q4",    "whisper",    464,  True),
+        ModelSpec("whisper-large-v3",             "mlx-community/whisper-large-v3-mlx",         "whisper",   3084,  True),
+        ModelSpec("whisper-medium",               "mlx-community/whisper-medium-mlx",           "whisper",   1525,  True),
+        ModelSpec("whisper-small",                "mlx-community/whisper-small-mlx",            "whisper",    481,  True),
+        ModelSpec("distil-whisper-large-v3",      "mlx-community/distil-whisper-large-v3",      "whisper",   1509,  False),
     ]
 }
 

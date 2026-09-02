@@ -37,7 +37,7 @@ Typical latency on Apple Silicon: **~150–300 ms** for a short utterance on war
    - Background daemon registration
 4. Press your hotkey (default `⌘+↑`) and dictate.
 
-That's it. No `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~600 MB Parakeet model from HuggingFace (~3 min on typical broadband).
+That's it. No `git clone`, no manual `pip install`, no shell scripts. The first transcription also fetches the ~2.4 GB Parakeet model from HuggingFace.
 
 ### From source
 

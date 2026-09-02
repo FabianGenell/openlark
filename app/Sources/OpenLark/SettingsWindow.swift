@@ -426,14 +426,14 @@ private struct ModelsSettingsPane: View {
 
                 modelSection(
                     title: "English",
-                    subtitle: "Parakeet: NVIDIA's fastest open speech model. Use these if you only need English.",
+                    subtitle: "Fastest models here, and the most accurate on English. Use these if English is all you dictate.",
                     accent: Theme.Meta.english,
                     models: ModelRegistry.all.filter { !$0.multilingual }
                 )
 
                 modelSection(
                     title: "Multilingual",
-                    subtitle: "Whisper: supports 99 languages. Pick the languages you speak under the Languages tab.",
+                    subtitle: "Parakeet v3 covers 25 European languages and detects them on its own. Whisper covers 99, and picks from the languages you set under Languages.",
                     accent: Theme.Meta.multilingual,
                     models: ModelRegistry.all.filter { $0.multilingual }
                 )
@@ -577,7 +577,7 @@ private struct ModelRow: View {
                 HStack(spacing: 6) {
                     ThemeChip(
                         systemImage: model.multilingual ? "globe" : "character",
-                        text: model.multilingual ? "99 languages" : "English only",
+                        text: model.multilingual ? "\(model.languageCount) languages" : "English only",
                         tint: familyColor
                     )
                     ThemeChip(
@@ -738,7 +738,7 @@ private struct LanguagesSettingsPane: View {
             Text("Languages I speak")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(Theme.text)
-            Text("Used only by multilingual models (Whisper). Pick one for fastest, most accurate transcription, or pick a few to let Whisper auto-detect each time.")
+            Text("Applies to the Whisper models only. Pick one for the fastest, most accurate transcription, or pick a few to let Whisper detect which you are speaking. Parakeet v3 handles its 25 languages on its own and ignores this.")
                 .settingsHint()
         }
     }
