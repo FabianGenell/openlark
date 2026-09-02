@@ -25,7 +25,7 @@ enum ModelRegistry {
             approxSizeMB: 600,
             multilingual: false,
             speedLabel: "Fastest",
-            summary: "English-only. NVIDIA's TDT 0.6B, ~25× realtime on Apple Silicon.",
+            summary: "NVIDIA's TDT 0.6B, ~25× realtime on Apple Silicon.",
             recommendedDefault: true
         ),
         ModelDescriptor(
@@ -35,7 +35,7 @@ enum ModelRegistry {
             approxSizeMB: 600,
             multilingual: false,
             speedLabel: "Fastest",
-            summary: "English-only. Newer TDT 0.6B with improved accuracy.",
+            summary: "Newer TDT 0.6B with improved accuracy.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -45,7 +45,7 @@ enum ModelRegistry {
             approxSizeMB: 1100,
             multilingual: false,
             speedLabel: "Fast",
-            summary: "English-only. Larger Parakeet, better on long/technical speech.",
+            summary: "Larger Parakeet, better on long and technical speech.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -55,7 +55,7 @@ enum ModelRegistry {
             approxSizeMB: 1600,
             multilingual: true,
             speedLabel: "Fast",
-            summary: "Multilingual. Recommended if you speak more than English.",
+            summary: "Recommended if you speak more than English.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -65,7 +65,7 @@ enum ModelRegistry {
             approxSizeMB: 3100,
             multilingual: true,
             speedLabel: "Best quality",
-            summary: "Multilingual. Highest accuracy. Slower than turbo, bigger download.",
+            summary: "Highest accuracy. Slower than turbo, bigger download.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -75,7 +75,7 @@ enum ModelRegistry {
             approxSizeMB: 1500,
             multilingual: true,
             speedLabel: "Balanced",
-            summary: "Multilingual. Good middle ground between speed and accuracy.",
+            summary: "Good middle ground between speed and accuracy.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -85,7 +85,7 @@ enum ModelRegistry {
             approxSizeMB: 500,
             multilingual: true,
             speedLabel: "Fast",
-            summary: "Multilingual. Smallest multilingual option, quick downloads.",
+            summary: "Smallest option here, quick to download.",
             recommendedDefault: false
         ),
         ModelDescriptor(
@@ -95,7 +95,7 @@ enum ModelRegistry {
             approxSizeMB: 1500,
             multilingual: false,
             speedLabel: "Fast",
-            summary: "English-only distillation of Whisper Large, very fast.",
+            summary: "Distillation of Whisper Large, very fast.",
             recommendedDefault: false
         ),
     ]

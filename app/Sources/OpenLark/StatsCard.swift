@@ -15,21 +15,14 @@ struct StatsCard: View {
             divider
             stat(value: formattedTimeSaved, unit: nil, label: "Saved this week")
         }
-        .padding(.vertical, 18)
+        .padding(.vertical, 20)
         .padding(.horizontal, 22)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-        )
+        .themeCard(radius: Theme.radiusLarge)
     }
 
     private var divider: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.06))
+            .fill(Theme.stroke)
             .frame(width: 1)
             .padding(.vertical, 4)
     }
@@ -38,17 +31,17 @@ struct StatsCard: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Theme.text)
                 if let unit {
                     Text(unit)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
                 }
             }
             Text(label)
                 .font(.system(size: 11))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textTertiary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

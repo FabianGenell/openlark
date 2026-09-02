@@ -21,6 +21,11 @@ enum SettingsWindowFactory {
         )
         window.titlebarAppearsTransparent = true
         window.title = "Settings"
+        // The palette is built for a dark surface, matching the recording
+        // overlay. Pin the appearance so a light-mode system doesn't hand us
+        // light system controls on a near-black background.
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(Theme.window)
         window.isReleasedWhenClosed = false
         window.center()
         let view = NSHostingView(rootView: SettingsRoot(navigator: navigator))
@@ -60,43 +65,32 @@ struct SettingsRoot: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar
-                .frame(width: 200)
-                .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+                .frame(width: 208)
+                .background(Theme.sidebar)
 
-            Divider().opacity(0.18)
+            Rectangle()
+                .fill(Theme.stroke)
+                .frame(width: 1)
 
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(nsColor: .windowBackgroundColor))
+                .background(Theme.windowGradient)
         }
         .frame(minWidth: 740, minHeight: 480)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.window)
+        .preferredColorScheme(.dark)
+        .tint(Theme.text)
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(SettingsSection.allCases) { section in
-                Button {
+                SidebarRow(
+                    section: section,
+                    isSelected: selection == section
+                ) {
                     navigator.section = section
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: section.icon)
-                            .font(.system(size: 13))
-                            .frame(width: 18)
-                        Text(section.rawValue)
-                            .font(.system(size: 13))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(selection == section ? Color.white.opacity(0.08) : .clear)
-                    )
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(selection == section ? Color.primary : Color.secondary)
             }
             Spacer()
         }
@@ -117,6 +111,42 @@ struct SettingsRoot: View {
         case .about:
             AboutSettingsPane()
         }
+    }
+}
+
+private struct SidebarRow: View {
+    let section: SettingsSection
+    let isSelected: Bool
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: section.icon)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .frame(width: 18)
+                Text(section.rawValue)
+                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(isSelected ? Theme.text : Theme.textSecondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.white.opacity(isSelected ? 0.10 : (hovered ? 0.05 : 0)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(isSelected ? Theme.stroke : Color.clear, lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
     }
 }
 
@@ -176,6 +206,7 @@ private struct VocabSettingsPane: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Vocabulary")
                     .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.text)
                 Text("Plain words force canonical casing and rescue near-miss phonetic mistakes. Snippets do verbatim replacement.")
                     .settingsHint()
 
@@ -190,10 +221,10 @@ private struct VocabSettingsPane: View {
                 VStack(spacing: 8) {
                     Image(systemName: "text.book.closed")
                         .font(.system(size: 28, weight: .light))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.textTertiary)
                     Text("No custom vocabulary yet.")
                         .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -216,18 +247,26 @@ private struct VocabSettingsPane: View {
                 .font(.system(size: 14))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
+                .foregroundStyle(Theme.text)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.white.opacity(0.04))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Theme.stroke, lineWidth: 0.5)
                 )
                 .onSubmit { commitWord() }
 
             if showingSnippetField {
                 Image(systemName: "arrow.right")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
                     .frame(width: 26, height: 26)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.06)))
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
 
                 TextField("replacement", text: $snippetTarget)
                     .textFieldStyle(.plain)
@@ -235,9 +274,14 @@ private struct VocabSettingsPane: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
                     .frame(maxWidth: 180)
+                    .foregroundStyle(Theme.text)
                     .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white.opacity(0.04))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Theme.stroke, lineWidth: 0.5)
                     )
                     .onSubmit { commitSnippet() }
             }
@@ -246,9 +290,7 @@ private struct VocabSettingsPane: View {
                 showingSnippetField.toggle()
                 if !showingSnippetField { snippetTarget = "" }
             }
-            .buttonStyle(.borderless)
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
+            .buttonStyle(ThemeButtonStyle())
         }
     }
 
@@ -278,24 +320,26 @@ private struct VocabRow: View {
     let entry: VocabEntry
     @ObservedObject var store: VocabStore
     @State private var hovered = false
-    @State private var deleteHovered = false
 
     var body: some View {
         HStack(spacing: 8) {
             Text(entry.source)
                 .font(.system(size: 14))
-                .foregroundStyle(.primary)
+                .foregroundStyle(Theme.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if entry.isSnippet, let replacement = entry.replacement {
                 Image(systemName: "arrow.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textTertiary)
                     .frame(width: 22, height: 22)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.06)))
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.white.opacity(0.06))
+                    )
                 Text(replacement)
                     .font(.system(size: 14))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(Theme.text)
                     .frame(minWidth: 120, alignment: .leading)
             }
 
@@ -305,26 +349,17 @@ private struct VocabRow: View {
                 store.remove(entry)
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .frame(width: 20, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5)
-                            .fill(deleteHovered ? Color.white.opacity(0.14) : Color.clear)
-                    )
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .opacity(hovered ? 0.8 : 0)
+            .buttonStyle(ThemeIconButtonStyle(size: 22, destructive: true))
+            .opacity(hovered ? 1 : 0)
             .allowsHitTesting(hovered)
-            .onHover { deleteHovered = $0 }
             .help("Remove \(entry.source)")
             .accessibilityLabel("Remove \(entry.source)")
         }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .padding(.horizontal, 20)
         .padding(.vertical, 8)
-        .background(hovered ? Color.white.opacity(0.04) : Color.clear)
+        .background(hovered ? Color.white.opacity(0.045) : Color.clear)
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
     }
@@ -386,18 +421,20 @@ private struct ModelsSettingsPane: View {
 
     var body: some View {
         SettingsScroll {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 26) {
                 header
 
                 modelSection(
                     title: "English",
                     subtitle: "Parakeet: NVIDIA's fastest open speech model. Use these if you only need English.",
+                    accent: Theme.Meta.english,
                     models: ModelRegistry.all.filter { !$0.multilingual }
                 )
 
                 modelSection(
                     title: "Multilingual",
                     subtitle: "Whisper: supports 99 languages. Pick the languages you speak under the Languages tab.",
+                    accent: Theme.Meta.multilingual,
                     models: ModelRegistry.all.filter { $0.multilingual }
                 )
             }
@@ -405,22 +442,64 @@ private struct ModelsSettingsPane: View {
         .task { await vm.refresh() }
     }
 
+    /// Restates the loaded model up top so the page answers "what am I using"
+    /// before the reader scrolls into the catalog.
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Speech model")
-                .font(.system(size: 18, weight: .semibold))
-            Text("OpenLark uses one model at a time. Download more to switch between them. The active one is loaded into memory, the rest sit on disk.")
-                .settingsHint()
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Speech model")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.text)
+                Text("OpenLark uses one model at a time. Download more to switch between them. The active one is loaded into memory, the rest sit on disk.")
+                    .settingsHint()
+            }
+
+            HStack(spacing: 12) {
+                MiniWaveform(height: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("IN USE")
+                        .font(.system(size: 9, weight: .semibold))
+                        .tracking(0.7)
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(activeName)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.text)
+                }
+
+                Spacer(minLength: 0)
+
+                if !vm.downloadedIds.contains(activeModelId) {
+                    ThemeChip(systemImage: "arrow.down.circle", text: "Not downloaded")
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .themeCard(fill: Color.white.opacity(0.05))
         }
     }
 
-    private func modelSection(title: String, subtitle: String, models: [ModelDescriptor]) -> some View {
+    private var activeName: String {
+        ModelRegistry.find(activeModelId)?.displayName ?? activeModelId
+    }
+
+    private func modelSection(
+        title: String,
+        subtitle: String,
+        accent: Color,
+        models: [ModelDescriptor]
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title.uppercased())
-                    .font(.system(size: 11, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(accent)
+                        .frame(width: 6, height: 6)
+                    Text(title.uppercased())
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(accent.opacity(0.9))
+                }
                 Text(subtitle)
                     .settingsHint()
             }
@@ -457,52 +536,96 @@ private struct ModelRow: View {
     let onDelete: () -> Void
 
     @State private var showDeleteConfirm: Bool = false
+    @State private var hovered = false
+
+    /// Only the model that is both selected and on disk is actually loaded.
+    private var isLoaded: Bool { isActive && isDownloaded }
+
+    /// Hue for the model's language family, repeated on the rail and the
+    /// language chip so a glance down the page separates the two families.
+    private var familyColor: Color {
+        model.multilingual ? Theme.Meta.multilingual : Theme.Meta.english
+    }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .top, spacing: 0) {
+            // Family rail. The one visual that survives peripheral vision.
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(familyColor.opacity(isLoaded ? 0.95 : 0.45))
+                .frame(width: 3)
+                .frame(maxHeight: .infinity)
+                .padding(.vertical, 10)
+                .padding(.trailing, 12)
+
+            HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 8) {
                     Text(model.displayName)
                         .font(.system(size: 14, weight: .semibold))
-                    if isActive && isDownloaded {
-                        badge("Active", color: .green)
+                        .foregroundStyle(Theme.text)
+                    if isLoaded {
+                        MiniWaveform(barCount: 7, height: 11)
+                            .transition(.opacity)
                     }
                 }
+
                 Text(model.summary)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: 14) {
-                    metaChip(systemImage: "speedometer", text: model.speedLabel)
-                    metaChip(systemImage: "internaldrive", text: humanSize(mb: model.approxSizeMB))
+
+                HStack(spacing: 6) {
+                    ThemeChip(
+                        systemImage: model.multilingual ? "globe" : "character",
+                        text: model.multilingual ? "99 languages" : "English only",
+                        tint: familyColor
+                    )
+                    ThemeChip(
+                        systemImage: "speedometer",
+                        text: model.speedLabel,
+                        tint: Theme.Meta.speed
+                    )
+                    ThemeChip(
+                        systemImage: "internaldrive",
+                        text: humanSize(mb: model.approxSizeMB),
+                        tint: Theme.Meta.size
+                    )
                     if isDownloaded {
-                        metaChip(systemImage: "checkmark.circle.fill", text: "Downloaded", tint: .green)
+                        ThemeChip(
+                            systemImage: "checkmark",
+                            text: "On disk",
+                            tint: Theme.Meta.onDisk
+                        )
                     }
                 }
+                .padding(.top, 1)
+
                 if let error {
                     Text(error)
                         .font(.system(size: 11))
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.red.opacity(0.9))
                         .lineLimit(2)
                 }
             }
+
             Spacer(minLength: 8)
-            HStack(spacing: 6) {
-                actionButton
-                    .frame(minWidth: 110, alignment: .trailing)
-                if isDownloaded && !isActive {
-                    Button {
-                        showDeleteConfirm = true
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Delete this model, frees ~\(humanSize(mb: model.approxSizeMB))")
+
+            HStack(spacing: 4) {
+                actionControl
+
+                // Kept in the layout at all times so hovering a row never
+                // reflows it. Only opacity changes.
+                Button {
+                    showDeleteConfirm = true
+                } label: {
+                    Image(systemName: "trash")
                 }
+                .buttonStyle(ThemeIconButtonStyle(destructive: true))
+                .opacity(isDownloaded && !isActive && hovered ? 1 : 0)
+                .allowsHitTesting(isDownloaded && !isActive && hovered)
+                .help("Delete this model, frees ~\(humanSize(mb: model.approxSizeMB))")
+                .accessibilityLabel("Delete \(model.displayName)")
+            }
             }
         }
         .padding(14)
@@ -516,69 +639,54 @@ private struct ModelRow: View {
         } message: {
             Text("Frees about \(humanSize(mb: model.approxSizeMB)). You can re-download anytime.")
         }
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(isActive && isDownloaded ? 0.06 : 0.03))
+        .themeCard(
+            fill: isLoaded ? Color.white.opacity(0.07) : (hovered ? Theme.raisedHover : Theme.raised),
+            border: isLoaded ? Theme.strokeStrong : Theme.stroke,
+            borderWidth: isLoaded ? 1 : 0.5
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(
-                    isActive && isDownloaded ? Color.green.opacity(0.45) : Color.white.opacity(0.07),
-                    lineWidth: isActive && isDownloaded ? 1 : 0.5
-                )
-        )
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
     }
 
     @ViewBuilder
-    private var actionButton: some View {
+    private var actionControl: some View {
         if isDownloading {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("Downloading…")
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
             }
+            .frame(minWidth: 104, alignment: .trailing)
         } else if !isDownloaded {
             // Active-but-not-downloaded shouldn't happen for long: pressing
             // Download here makes the model usable; the daemon also auto-
             // loads the active model on first record.
             Button(action: onDownload) {
-                Label("Download", systemImage: "arrow.down.circle")
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Download")
+                }
             }
-            .controlSize(.regular)
-            .buttonStyle(.borderedProminent)
-            .tint(isActive ? .green : .accentColor)
+            .buttonStyle(ThemeButtonStyle())
+            .frame(minWidth: 104, alignment: .trailing)
         } else if !isActive {
-            Button("Use this model", action: onSetActive)
-                .controlSize(.regular)
-                .buttonStyle(.bordered)
+            Button("Use", action: onSetActive)
+                .buttonStyle(ThemeButtonStyle())
+                .frame(minWidth: 104, alignment: .trailing)
         } else {
             Text("In use")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.green)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(Color.green.opacity(0.14)))
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.3)
+                .foregroundStyle(Theme.text)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(Color.white.opacity(0.14))
+                )
+                .frame(minWidth: 104, alignment: .trailing)
         }
-    }
-
-    private func badge(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(color.opacity(0.18)))
-            .foregroundStyle(color)
-    }
-
-    private func metaChip(systemImage: String, text: String, tint: Color? = nil) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: systemImage)
-                .font(.system(size: 10, weight: .medium))
-            Text(text)
-                .font(.system(size: 11))
-        }
-        .foregroundStyle(tint ?? .secondary)
     }
 
     private func humanSize(mb: Int) -> String {
@@ -629,6 +737,7 @@ private struct LanguagesSettingsPane: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Languages I speak")
                 .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Theme.text)
             Text("Used only by multilingual models (Whisper). Pick one for fastest, most accurate transcription, or pick a few to let Whisper auto-detect each time.")
                 .settingsHint()
         }
@@ -802,18 +911,16 @@ private struct LanguageChip: View {
                 .lineLimit(1)
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.accentColor.opacity(0.8))
-                    .frame(width: 14, height: 14)
-                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ThemeIconButtonStyle(size: 16))
+            .accessibilityLabel("Remove \(name)")
         }
+        .foregroundStyle(Theme.text)
         .padding(.leading, 10)
         .padding(.trailing, 4)
         .padding(.vertical, 4)
-        .background(Capsule().fill(Color.accentColor.opacity(0.16)))
-        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.32), lineWidth: 0.5))
+        .background(Capsule().fill(Color.white.opacity(0.10)))
+        .overlay(Capsule().strokeBorder(Theme.stroke, lineWidth: 0.5))
     }
 }
 
@@ -828,23 +935,23 @@ private struct LanguageListRow: View {
             HStack(spacing: 10) {
                 Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 15, weight: isOn ? .regular : .light))
-                    .foregroundStyle(isOn ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(isOn ? Theme.text : Theme.textTertiary)
                     .frame(width: 20)
                 Text(lang.name)
                     .font(.system(size: 13, weight: isOn ? .medium : .regular))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(isOn ? Theme.text : Theme.textSecondary)
                 Text(lang.nativeName)
                     .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textTertiary)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 Text(lang.code.uppercased())
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.textTertiary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(hovered ? Color.white.opacity(0.04) : .clear)
+            .background(hovered ? Color.white.opacity(0.045) : .clear)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -860,6 +967,7 @@ private struct AboutSettingsPane: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("OpenLark")
                     .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(Theme.text)
                 Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0")")
                     .settingsHint()
             }
@@ -874,6 +982,7 @@ private struct AboutSettingsPane: View {
             SettingsGroup(title: "License") {
                 Text("MIT, free for personal and commercial use.")
                     .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
             }
         }
     }
@@ -887,6 +996,7 @@ private struct LinkRow: View {
         HStack {
             Text(label)
                 .font(.system(size: 13))
+                .foregroundStyle(Theme.text)
             Spacer()
             Button(action: {
                 if let u = URL(string: url) { NSWorkspace.shared.open(u) }
@@ -898,7 +1008,7 @@ private struct LinkRow: View {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))
                 }
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
             }
             .buttonStyle(.plain)
         }
@@ -929,21 +1039,14 @@ private struct SettingsGroup<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title.uppercased())
                 .font(.system(size: 11, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.secondary)
+                .tracking(0.6)
+                .foregroundStyle(Theme.textTertiary)
             VStack(alignment: .leading, spacing: 10) {
                 content
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(0.03))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-            )
+            .themeCard()
         }
     }
 }
@@ -952,7 +1055,7 @@ private extension View {
     func settingsHint() -> some View {
         self
             .font(.system(size: 12))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
