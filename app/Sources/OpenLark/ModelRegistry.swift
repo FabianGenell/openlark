@@ -28,7 +28,7 @@ enum ModelRegistry {
             approxSizeMB: 2472,
             languageCount: 1,
             speedLabel: "Fastest",
-            summary: "NVIDIA's TDT 0.6B, ~25× realtime on Apple Silicon. Best English accuracy here.",
+            summary: "NVIDIA's TDT 0.6B, ~25× realtime on Apple Silicon. Best English accuracy.",
             recommendedDefault: true
         ),
         ModelDescriptor(
@@ -48,7 +48,7 @@ enum ModelRegistry {
             approxSizeMB: 459,
             languageCount: 1,
             speedLabel: "Fastest",
-            summary: "Smallest download here. Good on clear speech, weaker on accents and noise.",
+            summary: "Smallest download. Good on clear speech, weaker on accents and noise.",
             recommendedDefault: false
         ),
         ModelDescriptor(

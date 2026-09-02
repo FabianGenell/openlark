@@ -412,7 +412,7 @@ private struct ModelsSettingsPane: View {
 
                 modelSection(
                     title: "English",
-                    subtitle: "Fastest models here, and the most accurate on English. Use these if English is all you dictate.",
+                    subtitle: "The fastest models, and the most accurate on English. Use these if English is all you dictate.",
                     accent: Theme.Meta.english,
                     models: ModelRegistry.all.filter { !$0.multilingual }
                 )
