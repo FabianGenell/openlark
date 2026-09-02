@@ -20,11 +20,14 @@ struct StatsCard: View {
         .themeCard(radius: Theme.radiusLarge)
     }
 
+    /// Height is pinned deliberately. A Rectangle with only a width set is
+    /// vertically greedy, so in a container that offers more height than the
+    /// card needs (the History window's VStack, as opposed to the scroll view
+    /// in Settings) it stretched the whole card to fill the space.
     private var divider: some View {
         Rectangle()
             .fill(Theme.stroke)
-            .frame(width: 1)
-            .padding(.vertical, 4)
+            .frame(width: 1, height: 34)
     }
 
     private func stat(value: String, unit: String?, label: String) -> some View {

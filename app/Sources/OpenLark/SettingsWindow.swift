@@ -136,7 +136,7 @@ private struct SidebarRow: View {
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.white.opacity(isSelected ? 0.10 : (hovered ? 0.05 : 0)))
+                    .fill(isSelected ? Theme.chip : (hovered ? Theme.raisedHover : .clear))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -248,14 +248,7 @@ private struct VocabSettingsPane: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 9)
                 .foregroundStyle(Theme.text)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.white.opacity(0.04))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Theme.stroke, lineWidth: 0.5)
-                )
+                .themeField()
                 .onSubmit { commitWord() }
 
             if showingSnippetField {
@@ -275,14 +268,7 @@ private struct VocabSettingsPane: View {
                     .padding(.vertical, 9)
                     .frame(maxWidth: 180)
                     .foregroundStyle(Theme.text)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.white.opacity(0.04))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .strokeBorder(Theme.stroke, lineWidth: 0.5)
-                    )
+                    .themeField()
                     .onSubmit { commitSnippet() }
             }
 
@@ -794,14 +780,7 @@ private struct LanguagesSettingsPane: View {
                         .padding(.vertical, 22)
                 }
             }
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(0.03))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-            )
+            .themeCard()
         }
     }
 
@@ -827,14 +806,7 @@ private struct LanguagesSettingsPane: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(
-            RoundedRectangle(cornerRadius: 7)
-                .fill(Color.white.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 7)
-                .strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5)
-        )
+        .themeField(radius: 7)
     }
 
     private func toggle(_ code: String, on: Bool) {
@@ -843,9 +815,14 @@ private struct LanguagesSettingsPane: View {
         } else {
             selected.remove(code)
         }
-        // Always keep at least one. Fall back to English if empty.
-        let codes = selected.isEmpty ? ["en"] : Array(selected)
-        UserModelSettings.setSelectedLanguages(codes)
+        // Always keep at least one. Fall back to English if empty, and put it
+        // back into `selected` too. Writing only to defaults left the list
+        // showing nothing selected while English was active, and the next
+        // language picked then replaced English instead of joining it.
+        if selected.isEmpty {
+            selected = ["en"]
+        }
+        UserModelSettings.setSelectedLanguages(Array(selected))
     }
 }
 

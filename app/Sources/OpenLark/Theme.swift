@@ -40,6 +40,7 @@ enum Theme {
     static let radius: CGFloat = 12
     static let radiusLarge: CGFloat = 16
     static let radiusSmall: CGFloat = 6
+    static let radiusMedium: CGFloat = 8
 
     /// Very slight vertical lift so large panes don't read as one flat slab.
     static var windowGradient: LinearGradient {
@@ -71,6 +72,20 @@ extension View {
         .overlay(
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .strokeBorder(border, lineWidth: borderWidth)
+        )
+    }
+}
+
+extension View {
+    /// Inset field surface, shared by the vocabulary and language inputs.
+    func themeField(radius: CGFloat = Theme.radiusMedium) -> some View {
+        background(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .strokeBorder(Theme.stroke, lineWidth: 0.5)
         )
     }
 }
@@ -121,32 +136,42 @@ struct ThemeChip: View {
 // MARK: - Buttons
 
 /// Filled button for the primary action in a row. White on dark, no accent.
+///
+/// The hover state lives in a nested View rather than in the style itself.
+/// ButtonStyle is not a View and is re-instantiated on every parent render, so
+/// @State on the style is not a documented contract; only @Environment is.
 struct ThemeButtonStyle: ButtonStyle {
     var prominent: Bool = false
-    @State private var hovered = false
 
     func makeBody(configuration: Configuration) -> some View {
-        let base = prominent ? 0.90 : 0.08
-        let lift = hovered ? (prominent ? 1.0 : 0.14) : base
-        return configuration.label
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(prominent ? Color.black.opacity(0.88) : Theme.text)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(configuration.isPressed ? lift * 0.8 : lift))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(
-                        prominent ? Color.clear : Theme.stroke,
-                        lineWidth: 0.5
-                    )
-            )
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovered)
+        ThemeButtonBody(configuration: configuration, prominent: prominent)
+    }
+
+    private struct ThemeButtonBody: View {
+        let configuration: Configuration
+        let prominent: Bool
+        @State private var hovered = false
+
+        var body: some View {
+            let base = prominent ? 0.90 : 0.08
+            let lift = hovered ? (prominent ? 1.0 : 0.14) : base
+            configuration.label
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(prominent ? Color.black.opacity(0.88) : Theme.text)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusMedium, style: .continuous)
+                        .fill(Color.white.opacity(configuration.isPressed ? lift * 0.8 : lift))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.radiusMedium, style: .continuous)
+                        .strokeBorder(prominent ? Color.clear : Theme.stroke, lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+                .onHover { hovered = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovered)
+        }
     }
 }
 
@@ -155,24 +180,34 @@ struct ThemeButtonStyle: ButtonStyle {
 struct ThemeIconButtonStyle: ButtonStyle {
     var size: CGFloat = 28
     var destructive: Bool = false
-    @State private var hovered = false
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(
-                hovered
-                    ? (destructive ? Color.red.opacity(0.9) : Theme.text)
-                    : Theme.textTertiary
-            )
-            .frame(width: size, height: size)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
-                    .fill(Color.white.opacity(hovered ? (configuration.isPressed ? 0.16 : 0.10) : 0))
-            )
-            .contentShape(Rectangle())
-            .onHover { hovered = $0 }
-            .animation(.easeOut(duration: 0.12), value: hovered)
+        ThemeIconBody(configuration: configuration, size: size, destructive: destructive)
+    }
+
+    private struct ThemeIconBody: View {
+        let configuration: Configuration
+        let size: CGFloat
+        let destructive: Bool
+        @State private var hovered = false
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(
+                    hovered
+                        ? (destructive ? Color.red.opacity(0.9) : Theme.text)
+                        : Theme.textTertiary
+                )
+                .frame(width: size, height: size)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                        .fill(Color.white.opacity(hovered ? (configuration.isPressed ? 0.16 : 0.10) : 0))
+                )
+                .contentShape(Rectangle())
+                .onHover { hovered = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovered)
+        }
     }
 }
 

@@ -12,6 +12,10 @@ enum HistoryWindowFactory {
         )
         window.titlebarAppearsTransparent = true
         window.title = "History"
+        // Matches Settings. Theme's palette assumes a dark surface, and
+        // StatsCard is shared between the two windows.
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(Theme.window)
         window.isReleasedWhenClosed = false
         window.center()
 
@@ -67,7 +71,8 @@ struct HistoryView: View {
             }
         }
         .frame(minWidth: 560, minHeight: 560)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Theme.windowGradient)
+        .preferredColorScheme(.dark)
     }
 
     private var header: some View {
@@ -193,13 +198,10 @@ private struct HistoryRow: View {
     private func iconButton(symbol: String, help: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .frame(width: 24, height: 24)
-                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
+        .buttonStyle(ThemeIconButtonStyle(size: 24, destructive: symbol == "xmark"))
         .help(help)
+        .accessibilityLabel(help)
     }
 
     private func formatTimestamp(_ date: Date) -> String {
