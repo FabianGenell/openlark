@@ -24,14 +24,19 @@ struct StatsCard: View {
     /// vertically greedy, so in a container that offers more height than the
     /// card needs (the History window's VStack, as opposed to the scroll view
     /// in Settings) it stretched the whole card to fill the space.
+    ///
+    /// The horizontal padding is what puts it in the middle. The columns sit
+    /// flush against each other, so without a gutter the rule lands hard up
+    /// against the next column's number instead of between the two.
     private var divider: some View {
         Rectangle()
-            .fill(Theme.stroke)
-            .frame(width: 1, height: 34)
+            .fill(Color.white.opacity(0.12))
+            .frame(width: 1, height: 32)
+            .padding(.horizontal, 8)
     }
 
     private func stat(value: String, unit: String?, label: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .center, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value)
                     .font(.system(size: 24, weight: .semibold))
@@ -46,7 +51,11 @@ struct StatsCard: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textTertiary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // Centred, not leading. Left-aligning inside equal-width columns left
+        // dead space to the right of every label, so each rule read as though
+        // it belonged to the column on its right rather than sitting between
+        // the two.
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var formattedWords: String {
