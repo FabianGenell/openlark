@@ -224,6 +224,35 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         )
         guard status == kCMBlockBufferNoErr, let dataPointer else { return }
 
+        // Everything below reads `dataPointer` as one flat interleaved run, so
+        // refuse anything that isn't. Two ways that assumption breaks:
+        //
+        // 1. The pointer is only valid for `lengthAtOffset` bytes. Non-
+        //    interleaved audio arrives as one memory block per channel, so the
+        //    first block is shorter than the buffer and every read past it is
+        //    out of bounds.
+        // 2. For a non-interleaved ASBD, mBytesPerFrame counts one channel's
+        //    bytes, so frameCount below comes out `channels` times too large
+        //    and the indexing runs off the end again.
+        //
+        // Neither shows up on the 1-channel built-in mic, which is why this
+        // went unnoticed. Handling planar layouts properly needs
+        // CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer and a
+        // multi-channel device to verify against; until then, dropping the
+        // buffer with a log line beats reading past the end of it.
+        guard asbd.mBytesPerFrame > 0 else {
+            AppLogger.log("⚠ dropping sample buffer: mBytesPerFrame is 0")
+            return
+        }
+        guard interleaved || channels == 1 else {
+            AppLogger.log("⚠ dropping sample buffer: non-interleaved \(channels)-channel input is not supported yet")
+            return
+        }
+        guard lengthAtOffset >= totalBytes else {
+            AppLogger.log("⚠ dropping sample buffer: fragmented block (\(lengthAtOffset) of \(totalBytes) bytes contiguous)")
+            return
+        }
+
         // Walk the block as the source format and emit Int16 mono samples.
         let frameCount = totalBytes / Int(asbd.mBytesPerFrame)
         var newSamples = [Int16]()
