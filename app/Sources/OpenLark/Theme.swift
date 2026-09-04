@@ -35,6 +35,8 @@ enum Theme {
         static let english = Color(red: 0.40, green: 0.83, blue: 0.80)
         /// Multilingual family (Whisper).
         static let multilingual = Color(red: 0.68, green: 0.60, blue: 0.98)
+        /// The polish pass and its language models.
+        static let polish = Color(red: 0.96, green: 0.65, blue: 0.72)
     }
 
     static let radius: CGFloat = 12

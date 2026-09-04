@@ -8,6 +8,14 @@ import SwiftUI
 @MainActor
 final class SettingsNavigator: ObservableObject {
     @Published var section: SettingsSection = .general
+    /// Anchor to scroll to once the section is showing. Cleared after the jump
+    /// so returning to the page later starts at the top as usual.
+    @Published var scrollTarget: String?
+
+    func go(_ section: SettingsSection, to anchor: String? = nil) {
+        self.section = section
+        scrollTarget = anchor
+    }
 }
 
 enum SettingsWindowFactory {
@@ -15,11 +23,14 @@ enum SettingsWindowFactory {
     static func make(navigator: SettingsNavigator) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 580),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.titlebarAppearsTransparent = true
+        // An opaque titlebar, not a transparent one over full-size content.
+        // With fullSizeContentView the scroll view ran under the title, so
+        // rows slid behind the word "Settings" and collided with it.
+        window.titlebarAppearsTransparent = false
         window.title = "Settings"
         // The palette is built for a dark surface, matching the recording
         // overlay. Pin the appearance so a light-mode system doesn't hand us
@@ -37,16 +48,25 @@ enum SettingsWindowFactory {
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case vocabulary = "Vocabulary"
+    case polish = "Polish"
     case models = "Models"
     case languages = "Languages"
     case about = "About"
 
     var id: String { rawValue }
 
+    /// Hue for the row's glyph while the section is selected. Unselected rows
+    /// stay grey like every other one; only the selected Polish row is pink,
+    /// echoing the sparkle on the recording pill.
+    var selectedTint: Color? {
+        self == .polish ? Theme.Meta.polish : nil
+    }
+
     var icon: String {
         switch self {
         case .general: return "gauge.medium"
         case .vocabulary: return "text.book.closed"
+        case .polish: return "sparkle"
         case .models: return "cpu"
         case .languages: return "globe"
         case .about: return "info.circle"
@@ -104,8 +124,10 @@ struct SettingsRoot: View {
             GeneralSettingsPane()
         case .vocabulary:
             VocabSettingsPane(store: VocabStore.shared)
+        case .polish:
+            PolishSettingsPane(navigator: navigator, store: PolishProfileStore.shared)
         case .models:
-            ModelsSettingsPane()
+            ModelsSettingsPane(navigator: navigator)
         case .languages:
             LanguagesSettingsPane()
         case .about:
@@ -121,14 +143,25 @@ private struct SidebarRow: View {
 
     @State private var hovered = false
 
+    /// Only the glyph takes the section's hue, never the label, so the row still
+    /// reads as one of a set.
+    private var iconTint: Color {
+        guard isSelected else { return Theme.textSecondary }
+        return section.selectedTint ?? Theme.text
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
+                // Weight stays put across states. Bolding the selected row
+                // reflows it a hair wider and the whole sidebar twitches as you
+                // move between pages; colour alone carries the selection.
                 Image(systemName: section.icon)
-                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(iconTint)
                     .frame(width: 18)
                 Text(section.rawValue)
-                    .font(.system(size: 13, weight: isSelected ? .medium : .regular))
+                    .font(.system(size: 13, weight: .regular))
                 Spacer(minLength: 0)
             }
             .foregroundStyle(isSelected ? Theme.text : Theme.textSecondary)
@@ -160,6 +193,14 @@ private struct GeneralSettingsPane: View {
         SettingsScroll {
             StatsCard(stats: history.stats())
 
+            SettingsGroup(title: "Hotkey") {
+                HStack {
+                    Text("Toggle recording")
+                    Spacer()
+                    KeyboardShortcuts.Recorder(for: .toggleRecording)
+                }
+            }
+
             SettingsGroup(title: "Startup") {
                 Toggle("Launch OpenLark at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
@@ -176,19 +217,631 @@ private struct GeneralSettingsPane: View {
                             launchAtLogin = service.status == .enabled
                         }
                     }
-                Text("Starts OpenLark automatically when you log in so the menu bar item is always available.")
-                    .settingsHint()
             }
 
-            SettingsGroup(title: "Hotkey") {
-                HStack {
-                    Text("Toggle recording")
-                    Spacer()
-                    KeyboardShortcuts.Recorder(for: .toggleRecording)
-                }
-                Text("Tap the field, then press the keys you want. Pick a combination that doesn't clash with apps you use. Modifier + arrow / letter works well.")
-                    .settingsHint()
+        }
+    }
+
+}
+
+// MARK: - Polish
+
+private struct PolishSettingsPane: View {
+    @ObservedObject var navigator: SettingsNavigator
+    @ObservedObject var store: PolishProfileStore
+    @AppStorage(PolishSettings.polishByDefaultKey) private var polishOn: Bool = false
+    /// One row open at a time, so the page stays a list rather than growing
+    /// into a wall of editors.
+    @State private var expandedId: UUID?
+    /// A row that should take the caret as soon as it appears, so "New" lands
+    /// you typing the name instead of hunting for the field.
+    @State private var focusNameId: UUID?
+
+    var body: some View {
+        SettingsScroll {
+            VStack(alignment: .leading, spacing: 22) {
+                header
+
+                Toggle("Polish transcriptions", isOn: $polishOn)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .themeCard()
+
+                profilesSection
+                PolishPillHint()
             }
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Polish")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Theme.text)
+            Text("Tidies a dictation before it lands: filler, repeated words, punctuation, paragraphs.")
+                .settingsHint()
+        }
+    }
+
+    // MARK: Profiles
+
+    private var profilesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("PROFILES")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Button {
+                    let created = store.add()
+                    expandedId = created.id
+                    focusNameId = created.id
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text("New")
+                    }
+                }
+                .buttonStyle(ThemeButtonStyle())
+            }
+
+            VStack(spacing: 0) {
+                ForEach(Array(store.profiles.enumerated()), id: \.element.id) { idx, profile in
+                    PolishProfileRow(
+                        profile: profile,
+                        isActive: profile.id == store.active?.id,
+                        isExpanded: expandedId == profile.id,
+                        canDelete: store.profiles.count > 1,
+                        onUse: { store.setActive(profile) },
+                        onToggleExpanded: {
+                            expandedId = expandedId == profile.id ? nil : profile.id
+                        },
+                        onChange: { store.update($0) },
+                        autofocusName: focusNameId == profile.id,
+                        onAutofocusHandled: { focusNameId = nil },
+                        onDelete: {
+                            if expandedId == profile.id { expandedId = nil }
+                            store.remove(profile)
+                        },
+                        onChooseModel: { navigator.go(.models, to: ModelsSettingsPane.polishAnchor) }
+                    )
+                    if idx < store.profiles.count - 1 {
+                        Divider().opacity(0.07).padding(.leading, 40)
+                    }
+                }
+            }
+            .themeCard()
+        }
+    }
+}
+
+/// One profile, collapsed to a line and expanded to its own editor in place.
+/// The row is the profile: there is no second panel elsewhere on the page that
+/// has to be kept in sync with whichever line is highlighted.
+private struct PolishProfileRow: View {
+    let profile: PolishProfile
+    let isActive: Bool
+    let isExpanded: Bool
+    let canDelete: Bool
+    let onUse: () -> Void
+    let onToggleExpanded: () -> Void
+    let onChange: (PolishProfile) -> Void
+    let autofocusName: Bool
+    let onAutofocusHandled: () -> Void
+    let onDelete: () -> Void
+    let onChooseModel: () -> Void
+
+    @State private var hovered = false
+    @State private var draft: PolishProfile
+    @FocusState private var nameFocused: Bool
+    @State private var showDeleteConfirm = false
+    @State private var editingName = false
+    @State private var showAdvanced = false
+    @State private var advancedHovered = false
+    @ObservedObject private var downloaded = DownloadedModelsCache.shared
+
+    init(
+        profile: PolishProfile,
+        isActive: Bool,
+        isExpanded: Bool,
+        canDelete: Bool,
+        onUse: @escaping () -> Void,
+        onToggleExpanded: @escaping () -> Void,
+        onChange: @escaping (PolishProfile) -> Void,
+        autofocusName: Bool,
+        onAutofocusHandled: @escaping () -> Void,
+        onDelete: @escaping () -> Void,
+        onChooseModel: @escaping () -> Void
+    ) {
+        self.profile = profile
+        self.isActive = isActive
+        self.isExpanded = isExpanded
+        self.canDelete = canDelete
+        self.onUse = onUse
+        self.onToggleExpanded = onToggleExpanded
+        self.onChange = onChange
+        self.autofocusName = autofocusName
+        self.onAutofocusHandled = onAutofocusHandled
+        self.onDelete = onDelete
+        self.onChooseModel = onChooseModel
+        _draft = State(initialValue: profile)
+    }
+
+    private var subtitle: String {
+        let instruction = draft.instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = PolishRegistry.find(draft.modelId)?.displayName
+        let temp = draft.temperature > 0 ? String(format: "temp %.2f", draft.temperature) : nil
+        return [instruction.isEmpty ? nil : instruction, model, temp]
+            .compactMap { $0 }
+            .joined(separator: "  ·  ")
+    }
+
+    private var resolvedModelId: String { draft.modelId }
+
+    private var modelLabel: String {
+        PolishRegistry.find(resolvedModelId)?.displayName ?? resolvedModelId
+    }
+
+    private var modelDetail: String? { nil }
+
+    /// Pinning a model that isn't on disk falls back silently at dictation
+    /// time, so the control says where it stands instead.
+    private var modelNote: String? {
+        if downloaded.isDownloading(resolvedModelId) { return "Downloading…" }
+        if downloaded.errors[resolvedModelId] != nil { return "Download failed" }
+        return downloaded.downloadedIds.contains(resolvedModelId) ? nil : "Not downloaded"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if isExpanded {
+                editor
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+            }
+        }
+        .background(rowFill)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .onChange(of: draft) { _, new in onChange(new) }
+        .confirmationDialog(
+            "Delete \(profile.name)?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private var rowFill: Color {
+        if isExpanded { return Color.white.opacity(0.035) }
+        return hovered ? Color.white.opacity(0.045) : .clear
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            // Separate from the row's own click target: choosing which profile
+            // runs and opening it to edit are different intentions.
+            Button(action: onUse) {
+                Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isActive ? Theme.text : Theme.textTertiary)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isActive ? "\(profile.name) is in use" : "Use \(profile.name)")
+            .accessibilityLabel(isActive ? "\(profile.name) is in use" : "Use \(profile.name)")
+
+            VStack(alignment: .leading, spacing: 2) {
+                if isExpanded && editingName {
+                    // The heading is the name field while you're renaming.
+                    // Writing the name twice, once as a heading and again in a
+                    // labelled box below, made the row look like two things.
+                    TextField("Name", text: $draft.name)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.text)
+                        .focused($nameFocused)
+                        .onSubmit { editingName = false }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(Theme.strokeStrong, lineWidth: 0.5)
+                        )
+                        .frame(maxWidth: 240, alignment: .leading)
+                        .padding(.leading, -6)
+                        .onChange(of: nameFocused) { _, focused in
+                            // Clicking away commits, same as pressing return.
+                            if !focused { editingName = false }
+                        }
+                } else {
+                    HStack(spacing: 4) {
+                        Text(draft.name)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.text)
+
+                        if isExpanded {
+                            Button {
+                                editingName = true
+                                DispatchQueue.main.async { nameFocused = true }
+                            } label: {
+                                Image(systemName: "square.and.pencil")
+                            }
+                            .buttonStyle(ThemeIconButtonStyle(size: 20))
+                            .help("Rename \(profile.name)")
+                            .accessibilityLabel("Rename \(profile.name)")
+                        }
+                    }
+                    if !isExpanded && !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(hovered ? Theme.textSecondary : Theme.textTertiary)
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
+
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+        // The whole row is the target, not just the chevron. The radio and the
+        // rename button are real Buttons, so they take their own clicks first;
+        // while renaming the gesture is off entirely so it can't steal focus
+        // from the field.
+        .onTapGesture {
+            guard !editingName else { return }
+            onToggleExpanded()
+        }
+    }
+
+    private var editor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Special polish instructions")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+
+                // A vertical TextField, not a TextEditor. TextEditor is a
+                // scroll view: it shows a scroller at a fixed height whether or
+                // not there is anything to scroll, and it has no placeholder,
+                // so the fake one had to be positioned by hand and never sat on
+                // the same baseline as the caret. This has a real placeholder
+                // and grows with the text instead of scrolling inside itself.
+                // No upper line limit: the field grows to fit whatever is in
+                // it, so a long instruction is read in full and the Settings
+                // page does the scrolling. Capping it meant a prompt of any
+                // real length was clipped with no way to scroll or resize.
+                TextField("Keep it formal.", text: $draft.instruction, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(2...)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.text)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .themeField()
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Model")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+
+                ThemeDropdown(
+                    value: modelLabel,
+                    detail: modelDetail,
+                    note: modelNote
+                ) {
+                    modelMenuItems
+                }
+                .frame(maxWidth: 320)
+            }
+
+            advanced
+
+            if canDelete {
+                HStack {
+                    Spacer()
+                    Button {
+                        showDeleteConfirm = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("Delete")
+                        }
+                    }
+                    .buttonStyle(ThemeButtonStyle())
+                    .help("Delete \(profile.name)")
+                }
+            }
+        }
+        .padding(.leading, 30)
+        .onAppear {
+            DownloadedModelsCache.shared.refresh()
+            guard autofocusName else { return }
+            editingName = true
+            // The field is created in the same layout pass; focusing it has to
+            // wait for that pass to finish or the caret lands nowhere.
+            DispatchQueue.main.async {
+                nameFocused = true
+                onAutofocusHandled()
+            }
+        }
+    }
+
+    /// Everything a profile can be tuned with that most profiles never need.
+    /// Collapsed by default so the common case stays three fields.
+    private var advanced: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                showAdvanced.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .rotationEffect(.degrees(showAdvanced ? 90 : 0))
+                    Text("Advanced")
+                        .font(.system(size: 12))
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(advancedHovered ? Theme.textSecondary : Theme.textTertiary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { advancedHovered = $0 }
+
+            if showAdvanced {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Temperature")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Text(String(format: "%.2f", draft.temperature))
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(Theme.text)
+                    }
+
+                    Slider(value: $draft.temperature, in: 0...1, step: 0.05)
+                        .controlSize(.small)
+
+                    HStack {
+                        Text("Same every time")
+                        Spacer()
+                        Text("Freer wording")
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textTertiary)
+                }
+                .padding(12)
+                .themeCard(fill: Color.white.opacity(0.03))
+            }
+        }
+        .animation(.easeOut(duration: 0.14), value: showAdvanced)
+    }
+
+    private var modelMenuItems: [PopupMenuItem] {
+        var items: [PopupMenuItem] = []
+        for model in PolishRegistry.all {
+            let onDisk = downloaded.downloadedIds.contains(model.id)
+            let busy = downloaded.isDownloading(model.id)
+            items.append(PopupMenuItem(
+                title: model.displayName,
+                subtitle: busy ? "downloading…"
+                    : (onDisk ? humanSize(mb: model.approxSizeMB)
+                              : "download " + humanSize(mb: model.approxSizeMB)),
+                isOn: draft.modelId == model.id,
+                action: { select(model.id) }
+            ))
+        }
+        items.append(.separator)
+        items.append(PopupMenuItem(title: "Manage models…", action: onChooseModel))
+        return items
+    }
+
+    /// Choosing a model that isn't on disk starts fetching it there and then.
+    /// Making the choice and then having to find the same model again in the
+    /// catalog to download it is two steps for one intention, and a profile
+    /// pointing at a missing model silently falls back at dictation time.
+    private func select(_ modelId: String) {
+        draft.modelId = modelId
+        guard !downloaded.downloadedIds.contains(modelId) else { return }
+        Task { await DownloadedModelsCache.shared.download(modelId) }
+    }
+
+    private func humanSize(mb: Int) -> String {
+        mb >= 1024 ? String(format: "%.1f GB", Double(mb) / 1024.0) : "\(mb) MB"
+    }
+}
+
+/// A drawn copy of the recording pill with a cursor resting on its glyph, for
+/// the one thing nothing else announces: that the glyph is a button.
+///
+/// Drawn rather than shipped as a PNG. It reuses the overlay's own `WaveformBars`
+/// and `KeyCap` at the overlay's own metrics, so it cannot drift out of date with
+/// the real pill, it stays sharp at any scale factor, and it costs the bundle
+/// nothing.
+private struct PolishPillHint: View {
+    @AppStorage("polishHintExpanded") private var expanded: Bool = false
+    @State private var headerHovered = false
+
+    /// A still frame of a real-looking utterance. Fixed rather than random, so
+    /// the picture is identical every time the pane opens.
+    private static let levels: [Float] = (0..<72).map { i in
+        let p = Double(i) / 71.0
+        let envelope = pow(sin(p * .pi), 0.55)
+        return Float(envelope * (0.28 + 0.72 * abs(sin(p * 23) * cos(p * 9))))
+    }
+
+    // The overlay's own metrics, so the drawing is the pill and not an
+    // approximation of it. See OverlayView.
+    private static let waveHeight: CGFloat = 52
+    private static let waveTopPad: CGFloat = 10
+    private static let barVPad: CGFloat = 9
+    private static let barContentHeight: CGFloat = 16
+    private static let barHPad: CGFloat = 14
+    private static let glyphWidth: CGFloat = 14
+
+    /// Where the cursor's tip has to land: the bar's padding plus half the
+    /// glyph across, and the middle of the bar down.
+    private static var glyphCenter: CGPoint {
+        CGPoint(
+            x: barHPad + glyphWidth / 2,
+            y: waveTopPad + waveHeight + barVPad + barContentHeight / 2
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 12) {
+                    pill
+                    Text("The glyph is a button. Click it to switch polish on and off without stopping the recording.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 12)
+            }
+        }
+        .padding(14)
+        .themeCard(fill: Color.white.opacity(0.03))
+        .animation(.easeOut(duration: 0.16), value: expanded)
+    }
+
+    private var header: some View {
+        Button {
+            expanded.toggle()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(headerHovered ? Theme.textSecondary : Theme.textTertiary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text("Switching it while you record")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(headerHovered ? Theme.text : Theme.textSecondary)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { headerHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: headerHovered)
+        .accessibilityLabel(expanded ? "Hide the recording pill example" : "Show the recording pill example")
+    }
+
+    private var pill: some View {
+        VStack(spacing: 0) {
+            WaveformBars(levels: Self.levels)
+                .frame(height: Self.waveHeight)
+                .padding(.horizontal, 20)
+                .padding(.top, Self.waveTopPad)
+
+            HStack(spacing: 10) {
+                Image(systemName: "sparkle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.Meta.polish)
+                    .frame(width: Self.glyphWidth, height: Self.barContentHeight)
+
+                Text("Voice")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.85))
+
+                Spacer(minLength: 0)
+
+                Text("Stop")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.7))
+                KeyCap(symbol: "command")
+                KeyCap(symbol: "arrow.up")
+            }
+            .padding(.horizontal, Self.barHPad)
+            .padding(.vertical, Self.barVPad)
+            .background(Color.black.opacity(0.55))
+            .overlay(alignment: .top) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 0.5)
+            }
+        }
+        .background(Color.black.opacity(0.82))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.07), lineWidth: 0.5)
+        )
+        // Outside the clip, so the pointer can hang past the pill's edge the
+        // way a real one does.
+        .overlay(alignment: .topLeading) {
+            MacPointer()
+                .offset(x: Self.glyphCenter.x + 1, y: Self.glyphCenter.y + 1)
+        }
+    }
+}
+
+/// The macOS arrow pointer, drawn to the system shape: white body, dark
+/// outline, soft drop shadow, hotspot at the very tip. Positioned by its tip,
+/// so callers place it at the point it should be pointing at.
+private struct MacPointer: View {
+    var height: CGFloat = 21
+
+    private var width: CGFloat { height * (12.0 / 19.0) }
+
+    var body: some View {
+        PointerShape()
+            .fill(.white)
+            .overlay(
+                PointerShape()
+                    .stroke(Color.black.opacity(0.85), lineWidth: 1)
+            )
+            .frame(width: width, height: height)
+            .shadow(color: .black.opacity(0.45), radius: 2.5, x: 0.5, y: 1.5)
+    }
+
+    private struct PointerShape: Shape {
+        func path(in rect: CGRect) -> Path {
+            // The classic pointer, in a 12 × 19 box with the tip at the origin.
+            let pts: [CGPoint] = [
+                CGPoint(x: 0.0,  y: 0.0),
+                CGPoint(x: 0.0,  y: 16.4),
+                CGPoint(x: 3.7,  y: 12.9),
+                CGPoint(x: 5.9,  y: 18.7),
+                CGPoint(x: 8.0,  y: 17.8),
+                CGPoint(x: 5.8,  y: 12.2),
+                CGPoint(x: 10.2, y: 12.0),
+            ]
+            let sx = rect.width / 12.0
+            let sy = rect.height / 19.0
+            var path = Path()
+            for (i, p) in pts.enumerated() {
+                let scaled = CGPoint(x: rect.minX + p.x * sx, y: rect.minY + p.y * sy)
+                if i == 0 { path.move(to: scaled) } else { path.addLine(to: scaled) }
+            }
+            path.closeSubpath()
+            return path
         }
     }
 }
@@ -351,81 +1004,220 @@ private struct VocabRow: View {
     }
 }
 
-// MARK: - Models
+private struct PolishModelRow: View {
+    /// One width for every state of the action column, so Download, Use and
+    /// In use are the same size and the column reads as a column.
+    static let actionWidth: CGFloat = 112
 
-@MainActor
-private final class ModelsViewModel: ObservableObject {
-    @Published var downloadedIds: Set<String> = []
-    @Published var inFlight: Set<String> = []
-    @Published var errors: [String: String] = [:]
-    @Published var refreshing: Bool = false
+    let model: PolishModelDescriptor
+    let usedByProfiles: Int
+    let isDownloaded: Bool
+    let isDownloading: Bool
+    let progress: Double?
+    let etaSeconds: Double?
+    let onDiskMB: Int
+    let error: String?
+    let onDownload: () -> Void
+    let onDelete: () -> Void
 
-    private let client = SidecarClient()
+    @State private var showDeleteConfirm: Bool = false
+    @State private var hovered = false
 
-    func refresh() async {
-        refreshing = true
-        defer { refreshing = false }
-        let result = await client.listModels()
-        if case .success(let list) = result {
-            downloadedIds = Set(list.filter { $0.downloaded }.map { $0.id })
+    /// Anything on disk is deletable, finished or not. Gating this on a
+    /// completed download stranded interrupted attempts with no way to reclaim
+    /// the space.
+    private var hasBytesOnDisk: Bool { isDownloaded || onDiskMB > 0 }
+
+    private var isLoaded: Bool { isDownloaded && usedByProfiles > 0 }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(Theme.Meta.polish.opacity(isLoaded ? 0.95 : 0.45))
+                .frame(width: 3)
+                .frame(maxHeight: .infinity)
+                .padding(.vertical, 10)
+                .padding(.trailing, 12)
+
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(model.displayName)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+
+                    Text(model.summary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        ThemeChip(
+                            systemImage: "speedometer",
+                            text: model.speedLabel,
+                            tint: Theme.Meta.speed
+                        )
+                        ThemeChip(
+                            systemImage: "internaldrive",
+                            text: humanSize(mb: model.approxSizeMB),
+                            tint: Theme.Meta.size
+                        )
+                        if isDownloaded {
+                            ThemeChip(
+                                systemImage: "checkmark",
+                                text: "On disk",
+                                tint: Theme.Meta.onDisk
+                            )
+                        }
+                        if usedByProfiles > 0 {
+                            ThemeChip(
+                                systemImage: "sparkle",
+                                text: usedByProfiles == 1 ? "1 profile" : "\(usedByProfiles) profiles",
+                                tint: Theme.Meta.polish
+                            )
+                        }
+                    }
+                    .padding(.top, 1)
+
+                    if !isDownloaded && onDiskMB > 0 {
+                        PartialDownloadBar(
+                            onDiskMB: onDiskMB,
+                            totalMB: model.approxSizeMB,
+                            live: progress
+                        )
+                    }
+
+                    if let error {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red.opacity(0.9))
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 4) {
+                    actionControl
+                        .frame(width: Self.actionWidth)
+
+                    Button {
+                        showDeleteConfirm = true
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(ThemeIconButtonStyle(destructive: true))
+                    .opacity(hasBytesOnDisk && hovered ? 1 : 0)
+                    .allowsHitTesting(hasBytesOnDisk && hovered)
+                    .help("Delete this model, frees ~\(humanSize(mb: model.approxSizeMB))")
+                    .accessibilityLabel("Delete \(model.displayName)")
+                }
+            }
+        }
+        .padding(14)
+        .confirmationDialog(
+            "Delete \(model.displayName)?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive, action: onDelete)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if !isDownloaded {
+                Text("Removes \(humanSize(mb: onDiskMB)) of a download that never finished.")
+            } else if usedByProfiles > 0 {
+                Text("\(usedByProfiles == 1 ? "A profile uses" : "\(usedByProfiles) profiles use") this model and will stop polishing until it's downloaded again. Frees about \(humanSize(mb: model.approxSizeMB)).")
+            } else {
+                Text("Frees about \(humanSize(mb: model.approxSizeMB)). You can re-download anytime.")
+            }
+        }
+        .themeCard(
+            fill: isLoaded ? Color.white.opacity(0.07) : (hovered ? Theme.raisedHover : Theme.raised),
+            border: isLoaded ? Theme.strokeStrong : Theme.stroke,
+            borderWidth: isLoaded ? 1 : 0.5
+        )
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+
+    @ViewBuilder
+    private var actionControl: some View {
+        if isDownloading {
+            DownloadProgress(progress: progress, etaSeconds: etaSeconds)
+        } else if !isDownloaded {
+            Button(action: onDownload) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.down")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Download")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(ThemeButtonStyle())
+        } else {
+            // Downloaded polish models have no action; the column still holds
+            // its width so the buttons above and below line up with it.
+            Color.clear.frame(height: 26)
         }
     }
 
-    func download(_ modelId: String) async {
-        inFlight.insert(modelId)
-        errors[modelId] = nil
-        defer { inFlight.remove(modelId) }
-        let result = await client.prefetch(modelId: modelId) { _ in
-            // progress is indeterminate from huggingface_hub today;
-            // we just keep "Downloading…" until it terminates.
+    private func humanSize(mb: Int) -> String {
+        if mb >= 1024 {
+            return String(format: "%.1f GB", Double(mb) / 1024.0)
         }
-        switch result {
-        case .success:
-            downloadedIds.insert(modelId)
-            DownloadedModelsCache.shared.refresh()
-        case .failure(let err):
-            errors[modelId] = "\(err)"
-        }
-    }
-
-    func delete(_ modelId: String) async {
-        errors[modelId] = nil
-        let result = await client.deleteModel(modelId: modelId)
-        switch result {
-        case .success:
-            downloadedIds.remove(modelId)
-            DownloadedModelsCache.shared.refresh()
-        case .failure(let err):
-            errors[modelId] = "\(err)"
-        }
+        return "\(mb) MB"
     }
 }
 
+// MARK: - Models
+
 private struct ModelsSettingsPane: View {
+    /// Anchor the General pane's "Model" row jumps to.
+    static let polishAnchor = "polish-models"
+
+    @ObservedObject var navigator: SettingsNavigator
     @AppStorage(UserModelSettings.activeModelIdKey) private var activeModelId: String = ModelRegistry.defaultModelId
-    @StateObject private var vm = ModelsViewModel()
+    @ObservedObject private var vm = DownloadedModelsCache.shared
 
     var body: some View {
-        SettingsScroll {
-            VStack(alignment: .leading, spacing: 26) {
-                header
+        ScrollViewReader { proxy in
+            SettingsScroll {
+                VStack(alignment: .leading, spacing: 26) {
+                    header
 
-                modelSection(
-                    title: "English",
-                    subtitle: "The fastest models, and the most accurate on English. Use these if English is all you dictate.",
-                    accent: Theme.Meta.english,
-                    models: ModelRegistry.all.filter { !$0.multilingual }
-                )
+                    modelSection(
+                        title: "English",
+                        subtitle: "The fastest models, and the most accurate on English. Use these if English is all you dictate.",
+                        accent: Theme.Meta.english,
+                        models: ModelRegistry.all.filter { !$0.multilingual }
+                    )
 
-                modelSection(
-                    title: "Multilingual",
-                    subtitle: "Parakeet v3 covers 25 European languages and detects them on its own. Whisper covers 99, and picks from the languages you set under Languages.",
-                    accent: Theme.Meta.multilingual,
-                    models: ModelRegistry.all.filter { $0.multilingual }
-                )
+                    modelSection(
+                        title: "Multilingual",
+                        subtitle: "Parakeet v3 covers 25 European languages and detects them on its own. Whisper covers 99, and picks from the languages you set under Languages.",
+                        accent: Theme.Meta.multilingual,
+                        models: ModelRegistry.all.filter { $0.multilingual }
+                    )
+
+                    polishSection
+                        .id(Self.polishAnchor)
+                }
             }
+            .onAppear { jump(proxy) }
+            .onChange(of: navigator.scrollTarget) { _, _ in jump(proxy) }
         }
-        .task { await vm.refresh() }
+        .task { await vm.refreshNow() }
+    }
+
+    /// Consumes the pending anchor, so coming back to this page later opens at
+    /// the top rather than replaying the last jump.
+    private func jump(_ proxy: ScrollViewProxy) {
+        guard let target = navigator.scrollTarget else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.25)) {
+                proxy.scrollTo(target, anchor: .top)
+            }
+            navigator.scrollTarget = nil
+        }
     }
 
     /// Restates the loaded model up top so the page answers "what am I using"
@@ -436,7 +1228,7 @@ private struct ModelsSettingsPane: View {
                 Text("Speech model")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(Theme.text)
-                Text("OpenLark uses one model at a time. Download more to switch between them. The active one is loaded into memory, the rest sit on disk.")
+                Text("OpenLark uses one speech model at a time, plus a polish model if you want one. Download more to switch between them. The active ones are loaded into memory, the rest sit on disk.")
                     .settingsHint()
             }
 
@@ -496,6 +1288,9 @@ private struct ModelsSettingsPane: View {
                         isActive: activeModelId == model.id,
                         isDownloaded: vm.downloadedIds.contains(model.id),
                         isDownloading: vm.inFlight.contains(model.id),
+                        progress: vm.progress[model.id],
+                        etaSeconds: vm.etaSeconds[model.id],
+                        onDiskMB: vm.onDiskMB[model.id] ?? 0,
                         error: vm.errors[model.id],
                         onSetActive: { activeModelId = model.id },
                         onDownload: {
@@ -511,11 +1306,58 @@ private struct ModelsSettingsPane: View {
     }
 }
 
+private extension ModelsSettingsPane {
+    /// Polish uses a language model rather than a speech model, so it sits in
+    /// its own group with its own hue. There is nothing to "use" here: each
+    /// polish profile names its own model, so this list only downloads and
+    /// deletes them.
+    var polishSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Theme.Meta.polish)
+                        .frame(width: 6, height: 6)
+                    Text("POLISH")
+                        .font(.system(size: 11, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(Theme.Meta.polish.opacity(0.9))
+                }
+                Text("Cleans up a finished transcript. Each profile under Polish picks the one it wants.")
+                    .settingsHint()
+            }
+            VStack(spacing: 8) {
+                ForEach(PolishRegistry.all) { model in
+                    PolishModelRow(
+                        model: model,
+                        usedByProfiles: PolishProfileStore.shared.profileCount(usingModel: model.id),
+                        isDownloaded: vm.downloadedIds.contains(model.id),
+                        isDownloading: vm.inFlight.contains(model.id),
+                        progress: vm.progress[model.id],
+                        etaSeconds: vm.etaSeconds[model.id],
+                        onDiskMB: vm.onDiskMB[model.id] ?? 0,
+                        error: vm.errors[model.id],
+                        onDownload: { Task { await vm.download(model.id) } },
+                        onDelete: { Task { await vm.delete(model.id) } }
+                    )
+                }
+            }
+        }
+    }
+}
+
 private struct ModelRow: View {
+    /// One width for every state of the action column, so Download, Use and
+    /// In use are the same size and the column reads as a column.
+    static let actionWidth: CGFloat = 112
+
     let model: ModelDescriptor
     let isActive: Bool
     let isDownloaded: Bool
     let isDownloading: Bool
+    let progress: Double?
+    let etaSeconds: Double?
+    let onDiskMB: Int
     let error: String?
     let onSetActive: () -> Void
     let onDownload: () -> Void
@@ -523,6 +1365,11 @@ private struct ModelRow: View {
 
     @State private var showDeleteConfirm: Bool = false
     @State private var hovered = false
+
+    /// Anything on disk is deletable, finished or not. Gating this on a
+    /// completed download stranded interrupted attempts with no way to reclaim
+    /// the space.
+    private var hasBytesOnDisk: Bool { isDownloaded || onDiskMB > 0 }
 
     /// Only the model that is both selected and on disk is actually loaded.
     private var isLoaded: Bool { isActive && isDownloaded }
@@ -586,6 +1433,14 @@ private struct ModelRow: View {
                 }
                 .padding(.top, 1)
 
+                if !isDownloaded && onDiskMB > 0 {
+                    PartialDownloadBar(
+                        onDiskMB: onDiskMB,
+                        totalMB: model.approxSizeMB,
+                        live: progress
+                    )
+                }
+
                 if let error {
                     Text(error)
                         .font(.system(size: 11))
@@ -598,6 +1453,7 @@ private struct ModelRow: View {
 
             HStack(spacing: 4) {
                 actionControl
+                    .frame(width: Self.actionWidth)
 
                 // Kept in the layout at all times so hovering a row never
                 // reflows it. Only opacity changes.
@@ -607,8 +1463,8 @@ private struct ModelRow: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(ThemeIconButtonStyle(destructive: true))
-                .opacity(isDownloaded && !isActive && hovered ? 1 : 0)
-                .allowsHitTesting(isDownloaded && !isActive && hovered)
+                .opacity(hasBytesOnDisk && !isActive && hovered ? 1 : 0)
+                .allowsHitTesting(hasBytesOnDisk && !isActive && hovered)
                 .help("Delete this model, frees ~\(humanSize(mb: model.approxSizeMB))")
                 .accessibilityLabel("Delete \(model.displayName)")
             }
@@ -623,7 +1479,11 @@ private struct ModelRow: View {
             Button("Delete", role: .destructive, action: onDelete)
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Frees about \(humanSize(mb: model.approxSizeMB)). You can re-download anytime.")
+            if !isDownloaded {
+                Text("Removes \(humanSize(mb: onDiskMB)) of a download that never finished.")
+            } else {
+                Text("Frees about \(humanSize(mb: model.approxSizeMB)). You can re-download anytime.")
+            }
         }
         .themeCard(
             fill: isLoaded ? Color.white.opacity(0.07) : (hovered ? Theme.raisedHover : Theme.raised),
@@ -637,13 +1497,7 @@ private struct ModelRow: View {
     @ViewBuilder
     private var actionControl: some View {
         if isDownloading {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text("Downloading…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.textSecondary)
-            }
-            .frame(minWidth: 104, alignment: .trailing)
+            DownloadProgress(progress: progress, etaSeconds: etaSeconds)
         } else if !isDownloaded {
             // Active-but-not-downloaded shouldn't happen for long: pressing
             // Download here makes the model usable; the daemon also auto-
@@ -654,24 +1508,28 @@ private struct ModelRow: View {
                         .font(.system(size: 10, weight: .semibold))
                     Text("Download")
                 }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(ThemeButtonStyle())
-            .frame(minWidth: 104, alignment: .trailing)
         } else if !isActive {
-            Button("Use", action: onSetActive)
-                .buttonStyle(ThemeButtonStyle())
-                .frame(minWidth: 104, alignment: .trailing)
+            Button(action: onSetActive) {
+                Text("Use").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(ThemeButtonStyle())
         } else {
+            // Same font, padding and corner as ThemeButtonStyle. It was a
+            // capsule with its own metrics, so it sat at a different height and
+            // width from the Download button on the row above and the column
+            // looked ragged.
             Text("In use")
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.3)
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.text)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
                 .background(
-                    Capsule().fill(Color.white.opacity(0.14))
+                    RoundedRectangle(cornerRadius: Theme.radiusMedium, style: .continuous)
+                        .fill(Color.white.opacity(0.14))
                 )
-                .frame(minWidth: 104, alignment: .trailing)
         }
     }
 
@@ -681,6 +1539,97 @@ private struct ModelRow: View {
             return String(format: "%.1f GB", gb)
         }
         return "\(mb) MB"
+    }
+}
+
+/// Percentage plus a bar, measured from bytes on disk. A spinner alone can't
+/// tell a running download from a dead one, which is how a download killed by a
+/// daemon restart sat there looking busy.
+/// How much of a model is on disk, as a bar under its chips. A wrapping
+/// "586 MB so far" chip said the same thing in two ragged lines and gave no
+/// sense of how much was left to go.
+private struct PartialDownloadBar: View {
+    let onDiskMB: Int
+    let totalMB: Int
+    /// Live fraction while a download is actually running. Nil means the bytes
+    /// on disk are leftovers from an interrupted attempt.
+    let live: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let live {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.07))
+                        Capsule()
+                            .fill(Theme.Meta.size.opacity(0.85))
+                            .frame(width: max(2, geo.size.width * min(1, max(0, live))))
+                    }
+                }
+                .frame(height: 3)
+
+                // Derived from the same fraction as the bar. Reading onDiskMB
+                // here showed a stale figure from the last models refresh
+                // beside a live percentage, and the two disagreed.
+                Text("\(size(Int(live * Double(totalMB)))) of \(size(totalMB))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
+                    .monospacedDigit()
+            } else {
+                // Deliberately not framed as progress. An interrupted download
+                // does not pick up where it left off: measured, a 603 MB partial
+                // blob was truncated and refetched from zero on the next
+                // attempt. Calling it "586 MB of 4.0 GB" next to a Resume button
+                // promised something that doesn't happen. It's disk being used,
+                // and the useful thing to offer is a way to reclaim it.
+                Text("\(size(onDiskMB)) left over from an interrupted download")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+        }
+        .padding(.top, 3)
+    }
+
+    private func size(_ mb: Int) -> String {
+        mb >= 1024 ? String(format: "%.1f GB", Double(mb) / 1024.0) : "\(mb) MB"
+    }
+}
+
+private struct DownloadProgress: View {
+    let progress: Double?
+    let etaSeconds: Double?
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecondary)
+                .monospacedDigit()
+            if let remaining {
+                Text(remaining)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textTertiary)
+                    .monospacedDigit()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private var label: String {
+        guard let progress else { return "Starting…" }
+        return "Downloading \(Int(progress * 100))%"
+    }
+
+    /// Deliberately coarse. The estimate is built from a one-minute window on a
+    /// connection that varies, so a figure like "7 min 12 sec" would claim a
+    /// precision it doesn't have and visibly jitter.
+    private var remaining: String? {
+        guard let etaSeconds, etaSeconds.isFinite, etaSeconds > 0 else { return nil }
+        if etaSeconds < 45 { return "less than a minute" }
+        let minutes = Int((etaSeconds / 60).rounded())
+        if minutes < 60 { return "about \(minutes) min left" }
+        let hours = Double(minutes) / 60
+        return "about \(String(format: "%.1f", hours)) hr left"
     }
 }
 
@@ -1010,14 +1959,26 @@ private struct SettingsScroll<Content: View>: View {
 
 private struct SettingsGroup<Content: View>: View {
     let title: String
+    /// Optional glyph on the group label, in its own hue. Only Polish uses one,
+    /// carrying the same sparkle and colour as the recording pill so the two
+    /// read as one feature across the app.
+    var icon: String? = nil
+    var tint: Color? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(Theme.textTertiary)
+            HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(tint ?? Theme.textTertiary)
+                }
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(tint ?? Theme.textTertiary)
+            }
             VStack(alignment: .leading, spacing: 10) {
                 content
             }

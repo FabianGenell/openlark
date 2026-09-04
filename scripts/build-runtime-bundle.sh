@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the OpenLark runtime bundle, a self-contained, relocatable Python
-# tree pre-populated with parakeet-mlx + mlx + numpy wheels.
+# tree pre-populated with parakeet-mlx + mlx-whisper + mlx-lm + mlx + numpy wheels.
 #
 # Output: build/openlark-runtime-arm64-darwin.tar.gz
 #
@@ -49,10 +49,11 @@ fi
 echo "› upgrading pip + wheel…"
 "$PYTHON" -m pip install --upgrade --quiet pip wheel
 
-echo "› installing parakeet-mlx + mlx-whisper + mlx + numpy + huggingface_hub into site-packages…"
+echo "› installing parakeet-mlx + mlx-whisper + mlx-lm + mlx + numpy + huggingface_hub into site-packages…"
 "$PYTHON" -m pip install --quiet --prefer-binary \
     "parakeet-mlx>=0.3.5,<0.4" \
     "mlx-whisper>=0.4.2" \
+    "mlx-lm>=0.28" \
     "numpy>=2.0" \
     "mlx>=0.18" \
     "huggingface_hub>=0.24"
@@ -75,6 +76,8 @@ echo "✓ built $OUT_DIR/$BUNDLE_NAME.tar.gz ($SIZE)"
 echo "  sha256: $SHA"
 echo ""
 echo "Next: upload to a GitHub release"
-echo "  gh release create runtime-v2 $OUT_DIR/$BUNDLE_NAME.tar.gz --title 'OpenLark runtime bundle v2' --notes 'Python 3.13 + parakeet-mlx + mlx-whisper + mlx + numpy + huggingface_hub, prebuilt for arm64 macOS.'"
+echo "  gh release create runtime-v3 $OUT_DIR/$BUNDLE_NAME.tar.gz --title 'OpenLark runtime bundle v3' --notes 'Python 3.13 + parakeet-mlx + mlx-whisper + mlx-lm + mlx + numpy + huggingface_hub, prebuilt for arm64 macOS.'"
+echo ""
+echo "The URL in SidecarInstaller.runtimeBundleURL must point at the same release."
 
 rm -rf "$WORK_DIR"

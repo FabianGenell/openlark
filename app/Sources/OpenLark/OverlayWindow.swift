@@ -14,8 +14,35 @@ final class OverlayWindowController {
         set { model.levelProvider = newValue }
     }
 
+    /// Whether the pill shows polish as armed, and what happens when the mic
+    /// button in it is clicked.
+    var polishOn: Bool {
+        get { model.polishOn }
+        set { model.polishOn = newValue }
+    }
+
+    var polishReady: Bool {
+        get { model.polishReady }
+        set { model.polishReady = newValue }
+    }
+
+    var onTogglePolish: (() -> Void)? {
+        get { model.onTogglePolish }
+        set { model.onTogglePolish = newValue }
+    }
+
+    var onSelectProfile: ((Int) -> Void)? {
+        get { model.onSelectProfile }
+        set { model.onSelectProfile = newValue }
+    }
+
+    func setProfiles(_ names: [String], active: String) {
+        model.profileNames = names
+        model.activeProfile = active
+    }
+
     func show() {
-        model.isProcessing = false
+        model.phase = .listening
         ensureWindow()
         guard let window else {
             AppLogger.log("overlay show: window nil after ensureWindow, fatal")
@@ -41,8 +68,12 @@ final class OverlayWindowController {
         model.start()
     }
 
-    func setProcessing() {
-        model.beginProcessing()
+    func setTranscribing() {
+        model.beginTranscribing()
+    }
+
+    func setPolishing() {
+        model.beginPolishing()
     }
 
     func hide() {
@@ -91,6 +122,7 @@ final class OverlayWindowController {
         // to the actual pill, not the shadow gutter.
         panel.isMovableByWindowBackground = false
         panel.pillInset = 20 // matches OverlayView's outer .padding
+        model.hostWindow = { [weak panel] in panel }
         panel.onDragEnded = { [weak self] in self?.persistFrame() }
 
         // Belt-and-braces: ensure the content view's backing layer is fully
@@ -179,15 +211,34 @@ final class DraggablePanel: NSPanel {
 
 @MainActor
 final class OverlayModel: ObservableObject {
+    enum Phase { case listening, transcribing, polishing }
+
     @Published var levels: [Float] = Array(repeating: 0, count: 64)
-    @Published var isProcessing: Bool = false
+    @Published var phase: Phase = .listening
+    /// Mirrors PolishSettings.polishByDefault for the recording on screen.
+    @Published var polishOn: Bool = false
+    /// False when polish is switched on but its model isn't on disk. The pill
+    /// has to say so: claiming polish is armed and then pasting the raw
+    /// transcript is the one thing it must never do.
+    @Published var polishReady: Bool = true
+    /// Profile names and which one is live, so the pill can switch profile
+    /// mid-recording without the overlay knowing about the store.
+    @Published var profileNames: [String] = []
+    @Published var activeProfile: String = ""
     var levelProvider: (() -> Float)?
+    var onTogglePolish: (() -> Void)?
+    var onSelectProfile: ((Int) -> Void)?
+    /// The panel the pill is drawn in, so a menu popped from it can duck under
+    /// the panel's window level for as long as it's up.
+    var hostWindow: (() -> NSWindow?)?
+
+    var isProcessing: Bool { phase != .listening }
 
     private var timer: Timer?
     private var processingPhase: Double = 0
 
     func start() {
-        isProcessing = false
+        phase = .listening
         levels = Array(repeating: 0, count: levels.count)
         startRecordingTimer()
     }
@@ -195,10 +246,17 @@ final class OverlayModel: ObservableObject {
     /// Switch to the "Transcribing…" state. Stops sampling the (now-stale) mic
     /// level and replaces it with a synthetic scanning animation so the user
     /// can clearly see that we're processing, not still listening.
-    func beginProcessing() {
-        isProcessing = true
+    func beginTranscribing() {
+        phase = .transcribing
         processingPhase = 0
         startProcessingTimer()
+    }
+
+    /// Second processing step, only when polish is on. The animation carries
+    /// straight on; only the label changes, so the overlay doesn't flicker
+    /// between two stages of the same wait.
+    func beginPolishing() {
+        phase = .polishing
     }
 
     func stop() {

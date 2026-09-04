@@ -23,12 +23,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let recorder = AudioRecorder()
     private let sidecar = SidecarClient()
     private let vocab = VocabStore.shared
+    private let polishProfiles = PolishProfileStore.shared
     private let history = HistoryStore.shared
     private let injector = TextInjector()
     private var recordingStartedAt: Date?
     private var recordingFrontmostApp: String?
     private var localEscMonitor: Any?
     private var maxDurationTimer: Timer?
+    /// Whether the recording in flight gets a polish pass. Read at the moment
+    /// it's needed, so flipping the switch mid-recording still counts.
+    private var polishRequested: Bool { PolishSettings.polishByDefault }
 
     /// Auto-stop recordings at this length. Above this we hit array-realloc
     /// stalls on the capture queue and the WAV header eventually overflows.
@@ -36,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     enum State { case idle, recording, transcribing }
     private var state: State = .idle
+    /// Bumped whenever a run ends, by finishing or by being cancelled. An
+    /// in-flight transcription compares the generation it started in against
+    /// this before touching anything, so a superseded run can't hide the
+    /// overlay of the recording that replaced it or paste its stale text.
+    private var runGeneration = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.log("app launched, pid=\(ProcessInfo.processInfo.processIdentifier)")
@@ -65,6 +74,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayController = OverlayWindowController()
         overlayController.audioLevelProvider = { [weak self] in
             self?.recorder.currentLevel ?? 0
+        }
+        overlayController.onTogglePolish = { [weak self] in
+            guard let self else { return }
+            self.setPolish(enabled: !self.polishRequested)
+        }
+        overlayController.onSelectProfile = { [weak self] index in
+            guard let self else { return }
+            let profiles = self.polishProfiles.profiles
+            guard profiles.indices.contains(index) else { return }
+            self.polishProfiles.setActive(profiles[index])
+            self.pushProfilesToOverlay()
+            AppLogger.log("polish profile switched to \(profiles[index].name)")
         }
 
         KeyboardShortcuts.onKeyDown(for: .toggleRecording) { [weak self] in
@@ -115,11 +136,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var micMenu: NSMenu!
     private var modelMenu: NSMenu!
+    private var toggleMenuItem: NSMenuItem!
+    private var profileMenu: NSMenu!
+    private var profileMenuItem: NSMenuItem!
     private var micMenuItem: NSMenuItem!
     private var modelMenuItem: NSMenuItem!
     private var copyLastMenuItem: NSMenuItem!
 
     private func setupMenuBar() {
+        // No images on any row either. An item is laid out [state][image][title],
+        // so once one row carries a checkmark the rows with icons and the rows
+        // with neither end up on three different title columns. Text-only plus
+        // the state column is what a Mac menu is supposed to look like anyway.
+        //
         // No keyEquivalents on any of these items. The app runs as .accessory
         // with no main menu, so a status-menu key equivalent only fires while
         // the menu is already open. Showing one implies a global shortcut that
@@ -135,11 +164,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
-        menu.addItem(NSMenuItem(
-            title: "Toggle Recording (⌘↑)",
+        toggleMenuItem = NSMenuItem(
+            title: "Toggle Recording",
             action: #selector(menuToggleRecording),
             keyEquivalent: ""
-        ))
+        )
+        menu.addItem(toggleMenuItem)
 
         // Puts the most recent transcript back on the clipboard, for when
         // something else has overwritten it since dictating.
@@ -148,10 +178,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(copyLastTranscript),
             keyEquivalent: ""
         )
-        copyLastMenuItem.image = NSImage(
-            systemSymbolName: "doc.on.doc",
-            accessibilityDescription: nil
-        )
         menu.addItem(copyLastMenuItem)
         menu.addItem(.separator())
 
@@ -159,7 +185,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         micMenu = NSMenu()
         micMenu.delegate = self
         micMenuItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
-        micMenuItem.image = NSImage(systemSymbolName: "mic", accessibilityDescription: nil)
         micMenuItem.submenu = micMenu
         menu.addItem(micMenuItem)
 
@@ -167,9 +192,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modelMenu = NSMenu()
         modelMenu.delegate = self
         modelMenuItem = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
-        modelMenuItem.image = NSImage(systemSymbolName: "cpu", accessibilityDescription: nil)
         modelMenuItem.submenu = modelMenu
         menu.addItem(modelMenuItem)
+
+        // Off plus the profiles, in one list. Polish being on and which profile
+        // is running are the same decision, so they're the same control.
+        // Rebuilt on every open, like the mic and model submenus.
+        profileMenu = NSMenu()
+        profileMenu.delegate = self
+        profileMenuItem = NSMenuItem(title: "Polish", action: nil, keyEquivalent: "")
+        profileMenuItem.submenu = profileMenu
+        menu.addItem(profileMenuItem)
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
@@ -280,6 +313,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         modelMenuItem.title = "Model: \(activeName)"
     }
 
+    fileprivate func rebuildProfileMenu() {
+        profileMenu.removeAllItems()
+        let on = PolishSettings.polishByDefault
+        let active = polishProfiles.active
+
+        let off = NSMenuItem(title: "Off", action: #selector(selectProfile(_:)), keyEquivalent: "")
+        off.representedObject = NSNull()
+        off.state = on ? .off : .on
+        off.target = self
+        profileMenu.addItem(off)
+        profileMenu.addItem(.separator())
+
+        for profile in polishProfiles.profiles {
+            let item = NSMenuItem(
+                title: profile.name,
+                action: #selector(selectProfile(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = profile.id.uuidString
+            item.state = (on && profile.id == active?.id) ? .on : .off
+            item.target = self
+            profileMenu.addItem(item)
+        }
+
+        profileMenu.addItem(.separator())
+        let manage = NSMenuItem(
+            title: "Edit profiles…",
+            action: #selector(openPolishSettings),
+            keyEquivalent: ""
+        )
+        manage.target = self
+        profileMenu.addItem(manage)
+
+        profileMenuItem.title = "Polish: " + (on ? (active?.name ?? "on") : "Off")
+    }
+
+    /// Picking a profile turns polish on as well; picking Off turns it off and
+    /// leaves the profile alone, so it comes back to the same one next time.
+    @objc private func selectProfile(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let id = UUID(uuidString: raw),
+              let profile = polishProfiles.profiles.first(where: { $0.id == id }) else {
+            setPolish(enabled: false)
+            return
+        }
+        polishProfiles.setActive(profile)
+        setPolish(enabled: true)
+        AppLogger.log("polish profile changed via menu: \(profile.name)")
+    }
+
+    @objc private func openPolishSettings() {
+        showSettings(section: .polish)
+    }
+
     @objc private func selectMic(_ sender: NSMenuItem) {
         let id = sender.representedObject as? String
         AudioInputs.setSelectedDeviceID(id)
@@ -290,6 +377,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let modelId = sender.representedObject as? String else { return }
         UserDefaults.standard.set(modelId, forKey: UserModelSettings.activeModelIdKey)
         AppLogger.log("active model changed via menu: \(modelId)")
+    }
+
+    /// Both record rows spell out their current shortcut. They're rebindable in
+    /// Settings, so a hardcoded "(⌘↑)" goes stale the moment someone changes one.
+    fileprivate func refreshRecordingItems() {
+        toggleMenuItem.title = "Toggle Recording" + Self.shortcutSuffix(.toggleRecording)
+    }
+
+    /// The one place the polish switch is written, so the menu checkbox and the
+    /// overlay's mic button can't drift apart.
+    private func setPolish(enabled: Bool) {
+        PolishSettings.polishByDefault = enabled
+        overlayController.polishOn = enabled
+        pushProfilesToOverlay()
+        AppLogger.log("polish set to \(enabled)")
+    }
+
+    private static func shortcutSuffix(_ name: KeyboardShortcuts.Name) -> String {
+        guard let shortcut = KeyboardShortcuts.getShortcut(for: name) else { return "" }
+        return " (\(shortcut))"
+    }
+
+    private func pushProfilesToOverlay() {
+        overlayController.setProfiles(
+            polishProfiles.profiles.map(\.name),
+            active: polishProfiles.active?.name ?? ""
+        )
     }
 
     // MARK: - Copy last transcript
@@ -416,6 +530,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingFrontmostApp = NSWorkspace.shared.frontmostApplication?.localizedName
         state = .recording
         recordingStartedAt = Date()
+        overlayController.polishOn = polishRequested
+        pushProfilesToOverlay()
         overlayController.show()
         installEscMonitor()
         installMaxDurationTimer()
@@ -445,7 +561,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         removeEscMonitor()
         removeMaxDurationTimer()
         state = .transcribing
-        overlayController.setProcessing()
+        overlayController.setTranscribing()
 
         guard let wav = recorder.stopAndExportWAV() else {
             AppLogger.log("stopAndTranscribe: no audio captured")
@@ -454,6 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         AppLogger.log("stopAndTranscribe: \(wav.count) bytes captured, sending to sidecar")
 
+        let generation = runGeneration
         Task { [weak self] in
             guard let self else { return }
             let modelId = UserModelSettings.activeModelId
@@ -461,21 +578,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let result = await self.sidecar.transcribe(
                 wav: wav, modelId: modelId, languages: languages
             )
-            self.overlayController.hide()
+            // Esc, or a new recording, happened while this was in flight.
+            // Everything below either paints the overlay or types into the
+            // user's document, and both belong to whatever is happening now.
+            guard generation == self.runGeneration else {
+                AppLogger.log("discarding superseded transcription (generation \(generation))")
+                return
+            }
             switch result {
             case .success(let raw):
-                let corrected = self.vocab.correct(raw)
+                // Vocab first, so the polish model reads the right spelling of
+                // names instead of guessing at a phonetic near-miss.
+                var corrected = self.vocab.correct(raw)
                 AppLogger.log("transcribed: \(raw.count) chars raw, \(corrected.count) chars corrected")
+                let unpolished = corrected
+                var profileUsed: String?
+                if self.polishRequested, !corrected.isEmpty {
+                    self.overlayController.setPolishing()
+                    profileUsed = self.polishProfiles.active?.name
+                    corrected = await self.polished(corrected)
+                    // Polish is another second or two of waiting, so check again.
+                    guard generation == self.runGeneration else {
+                        AppLogger.log("discarding superseded polish (generation \(generation))")
+                        return
+                    }
+                }
+                self.overlayController.hide()
                 if !corrected.isEmpty {
                     let duration = self.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
                     self.history.add(
                         text: corrected,
                         durationSeconds: duration,
-                        appName: self.recordingFrontmostApp
+                        appName: self.recordingFrontmostApp,
+                        originalText: unpolished,
+                        polishProfile: profileUsed
                     )
                     self.injector.inject(text: corrected)
                 }
             case .failure(let err):
+                self.overlayController.hide()
                 AppLogger.log("transcription failed: \(err)")
                 NSSound.beep()
                 // Restart the daemon ONLY when it's genuinely wedged (timeout)
@@ -499,13 +640,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.recordingStartedAt = nil
             self.recordingFrontmostApp = nil
+            self.runGeneration &+= 1
             self.state = .idle
         }
     }
 
+    /// Runs the polish pass, and returns the input untouched if anything at
+    /// all goes wrong. A dictation that reaches the clipboard slightly rough is
+    /// a far better outcome than one that doesn't reach it at all, so every
+    /// failure here is non-fatal.
+    private func polished(_ text: String) async -> String {
+        let modelId = PolishProfileStore.shared.activeModelId
+        let result = await sidecar.polish(
+            text: text,
+            modelId: modelId,
+            instruction: PolishProfileStore.shared.activeInstruction,
+            temperature: PolishProfileStore.shared.activeTemperature
+        )
+        switch result {
+        case .success(let polish):
+            if polish.polished {
+                AppLogger.log("polished: \(text.count) chars in, \(polish.text.count) chars out")
+                // Polishing can undo a vocab fix by re-casing or re-spacing a
+                // name. Re-running is cheap and leaves already-correct text alone.
+                return vocab.correct(polish.text)
+            }
+            AppLogger.log("polish discarded by the daemon (\(polish.reason ?? "no reason")), keeping the raw transcript")
+            return text
+        case .failure(let err):
+            AppLogger.log("polish failed: \(err), keeping the raw transcript")
+            if case SidecarClient.SidecarError.serverError(let msg) = err,
+               msg.contains("model not downloaded") || msg.contains("no polish support") {
+                showPolishSetupNoticeOnce()
+            }
+            return text
+        }
+    }
+
+    /// Shown at most once. Someone can press the polish hotkey having never
+    /// opened Settings, and silently pasting the unpolished text would look
+    /// like the hotkey did nothing.
+    private static let polishNoticeShownKey = "polishSetupNoticeShown"
+
+    private func showPolishSetupNoticeOnce() {
+        guard !UserDefaults.standard.bool(forKey: Self.polishNoticeShownKey) else { return }
+        UserDefaults.standard.set(true, forKey: Self.polishNoticeShownKey)
+
+        let alert = NSAlert()
+        alert.messageText = "Polish needs a small model downloaded first"
+        alert.informativeText = "Your dictation was pasted as-is. Download a polish model and it'll clean up your speech from then on."
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn {
+            showSettings(section: .models)
+        }
+    }
+
     private func cancel() {
+        // Esc arrives through a CGEventTap that defers to the main queue, so a
+        // press in the same run-loop turn as the stop hotkey lands after
+        // stopAndTranscribe() has already moved to .transcribing. Without this
+        // guard, cancel() would drop the state back to .idle underneath a live
+        // transcription; the user starts a new recording, and the old task then
+        // hides the new overlay and pastes its own text.
+        guard state != .idle else { return }
         removeEscMonitor()
         removeMaxDurationTimer()
+        runGeneration &+= 1
         recorder.cancel()
         overlayController.hide()
         state = .idle
@@ -544,11 +746,15 @@ extension AppDelegate: NSMenuDelegate {
             DownloadedModelsCache.shared.refresh()
             rebuildMicMenu()
             rebuildModelMenu()
+            rebuildProfileMenu()
+            refreshRecordingItems()
             refreshCopyLastItem()
         } else if menu === micMenu {
             rebuildMicMenu()
         } else if menu === modelMenu {
             rebuildModelMenu()
+        } else if menu === profileMenu {
+            rebuildProfileMenu()
         }
     }
 }

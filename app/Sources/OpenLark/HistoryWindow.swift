@@ -6,11 +6,14 @@ enum HistoryWindowFactory {
     static func make(injector: TextInjector) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 620, height: 720),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.titlebarAppearsTransparent = true
+        // An opaque titlebar, not a transparent one over full-size content.
+        // With fullSizeContentView the scroll view ran under the title, so
+        // rows slid behind the word "Settings" and collided with it.
+        window.titlebarAppearsTransparent = false
         window.title = "History"
         // Matches Settings. Theme's palette assumes a dark surface, and
         // StatsCard is shared between the two windows.
@@ -35,6 +38,7 @@ struct HistoryView: View {
         guard !search.isEmpty else { return store.entries }
         return store.entries.filter {
             $0.text.localizedCaseInsensitiveContains(search)
+                || ($0.originalText?.localizedCaseInsensitiveContains(search) ?? false)
         }
     }
 
@@ -147,16 +151,22 @@ private struct HistoryRow: View {
     let onPaste: () -> Void
     let onDelete: () -> Void
     @State private var hovered = false
+    @State private var showingOriginal = false
+
+    private var shownText: String {
+        showingOriginal ? (entry.originalText ?? entry.text) : entry.text
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(entry.text)
+                Text(shownText)
                     .font(.system(size: 13))
                     .foregroundStyle(.primary)
                     .lineLimit(4)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
                 HStack(spacing: 8) {
                     Text(formatTimestamp(entry.timestamp))
                         .font(.system(size: 11))
@@ -167,18 +177,58 @@ private struct HistoryRow: View {
                     Text(String(format: "%.1fs", entry.durationSeconds))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
+
+                    if entry.wasPolished {
+                        polishSwitch
+                    }
                 }
             }
 
-            if hovered {
-                actions
-            }
+            // Always in the layout, only the opacity changes. Inserting the
+            // buttons on hover reflowed the row and shoved the text sideways.
+            actions
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(hovered ? Color.white.opacity(0.04) : .clear)
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
+    }
+
+    /// Two words in a pill: which version of this dictation you're reading, and
+    /// the way to read the other one. It doubles as the "this was polished"
+    /// badge, so a polished row is marked without a separate label.
+    private var polishSwitch: some View {
+        HStack(spacing: 0) {
+            segment("Polished", selected: !showingOriginal) { showingOriginal = false }
+            segment("Original", selected: showingOriginal) { showingOriginal = true }
+        }
+        .padding(1.5)
+        .background(
+            Capsule().fill(Color.white.opacity(0.06))
+        )
+        .overlay(
+            Capsule().strokeBorder(Theme.stroke, lineWidth: 0.5)
+        )
+        .help(entry.polishProfile.map { "Polished with \($0)" } ?? "Polished")
+    }
+
+    private func segment(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(selected ? Theme.text : Theme.textTertiary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(
+                    Capsule().fill(selected ? Theme.Meta.polish.opacity(0.22) : .clear)
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Show the \(title.lowercased()) version")
     }
 
     private var actions: some View {

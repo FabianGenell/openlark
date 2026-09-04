@@ -3,8 +3,8 @@ import Foundation
 
 /// One-shot installer for the Python inference daemon.
 ///
-/// Downloads a pre-built runtime tarball (Python + parakeet-mlx + mlx + numpy)
-/// from the openlark GitHub releases, extracts it into
+/// Downloads a pre-built runtime tarball (Python + parakeet-mlx + mlx-whisper
+/// + mlx-lm + mlx + numpy) from the openlark GitHub releases, extracts it into
 /// ~/Library/Application Support/OpenLark/runtime/, copies the bundled
 /// server.py into ~/Library/Application Support/OpenLark/sidecar/, writes the
 /// launchd plist, and loads it.
@@ -83,7 +83,7 @@ final class SidecarInstaller: ObservableObject {
     /// (parakeet-mlx version bump, Python bump, etc.). Each new bundle gets
     /// its own runtime-vN release so updates are explicit.
     private let runtimeBundleURL = URL(string:
-        "https://github.com/FabianGenell/openlark/releases/download/runtime-v2/openlark-runtime-arm64-darwin.tar.gz"
+        "https://github.com/FabianGenell/openlark/releases/download/runtime-v3/openlark-runtime-arm64-darwin.tar.gz"
     )!
 
     var supportRoot: URL {
@@ -111,6 +111,11 @@ final class SidecarInstaller: ObservableObject {
     /// changes in a way that breaks the running daemon (new env vars,
     /// new wire protocol, new pip deps). On launch we compare; mismatch
     /// triggers an in-place reinstall (daemon unload + new plist + load).
+    ///
+    /// It records the daemon only. Whether a speech model has been downloaded
+    /// is a separate question with its own answer (the model is either in the
+    /// HF cache or it isn't), and conflating the two made a failed download
+    /// look like a broken install.
     var installedVersionURL: URL {
         supportRoot.appendingPathComponent(".installed-version", isDirectory: false)
     }
@@ -129,7 +134,13 @@ final class SidecarInstaller: ObservableObject {
     ///      whisper-large-v3-turbo-q4. The running daemon resolves model ids
     ///      from its own copy of server.py, so without this bump the two new
     ///      ids come back as "unknown model id".
-    private let currentInstalledVersion = "5"
+    /// v6 = polish pass: new `polish` command, a second model registry the
+    ///      running daemon has to know about, and the mlx-lm dependency. Ships
+    ///      with runtime-v3; an install still on the v2 bundle keeps its Python
+    ///      tree (the extract only runs when python3 is missing), so the daemon
+    ///      answers polish with "no polish support" until the runtime is
+    ///      refreshed. Every other feature carries on working.
+    private let currentInstalledVersion = "6"
 
     private var isRunning = false
     private var installTask: Task<Void, Never>?
@@ -222,13 +233,20 @@ final class SidecarInstaller: ObservableObject {
             stage = .waitingForSocket
             try await waitForDaemon()
 
+            // The daemon is installed and serving from here on. Record that
+            // before the model download, because the two succeed independently:
+            // a failed download used to leave the marker stale, so every later
+            // launch tore down a perfectly healthy daemon - unload, delete the
+            // socket, reload, wait up to 30s - before retrying, sometimes in
+            // the middle of a dictation.
+            writeInstalledVersion()
+
             // The engine is not truly ready until the active speech model is
             // downloaded. Do it here with visible progress and bounded timeouts
             // rather than letting the first dictation trigger a silent,
             // unbounded multi-minute download that looks like a hang.
             try await prefetchActiveModel()
 
-            writeInstalledVersion()
             stage = .done
         } catch is CancellationError {
             stage = .failed("Setup cancelled - press Retry to try again.")

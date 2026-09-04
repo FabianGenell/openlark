@@ -6,10 +6,11 @@ import Foundation
 /// Wire format (v2):
 ///   REQUEST:
 ///     [4 bytes BE]  header_len
-///     [N bytes]     UTF-8 JSON  { "cmd": "transcribe"|"prefetch"|"models"|"ping", ... }
+///     [N bytes]     UTF-8 JSON  { "cmd": "transcribe"|"polish"|"prefetch"|"models"|"ping", ... }
 ///     If cmd == "transcribe":
 ///       [4 bytes BE]  audio_len
 ///       [N bytes]     WAV-encoded audio (16 kHz mono PCM)
+///     If cmd == "polish", the transcript rides in the header as "text".
 ///
 ///   RESPONSE: one or more length-prefixed UTF-8 JSON frames. Connection
 ///   closes after the terminal frame.
@@ -66,7 +67,7 @@ actor SidecarClient {
             ]
             // 90s covers a cold model load plus inference. The daemon's own
             // watchdog fires at 180s, so the app gives up first and can restart it.
-            let response = try sendRequest(
+            let response = try await sendRequestOffActor(
                 header: header, audio: wav, expectMultiFrame: false, recvTimeout: 90
             )
             guard let first = response.first else {
@@ -84,6 +85,56 @@ actor SidecarClient {
         }
     }
 
+    // MARK: - Polish
+
+    struct PolishResult: Sendable {
+        let text: String
+        /// False when the daemon discarded the model's output and handed the
+        /// raw transcript back. `reason` says why, for the log.
+        let polished: Bool
+        let reason: String?
+    }
+
+    func polish(
+        text: String,
+        modelId: String,
+        instruction: String,
+        temperature: Double
+    ) async -> Result<PolishResult, Error> {
+        do {
+            let header: [String: Any] = [
+                "cmd": "polish",
+                "model": modelId,
+                "text": text,
+                "instruction": instruction,
+                "temperature": temperature,
+            ]
+            // Generation is a second or two on the models we ship, and a cold
+            // load adds a few more. 90s matches transcribe: well past any
+            // healthy path, and under the daemon's own 180s watchdog so the
+            // app gives up first and can restart it.
+            let response = try await sendRequestOffActor(
+                header: header, audio: nil, expectMultiFrame: false, recvTimeout: 90
+            )
+            guard let first = response.first else {
+                return .failure(SidecarError.recvEOF)
+            }
+            if (first["event"] as? String) == "error" {
+                return .failure(SidecarError.serverError((first["message"] as? String) ?? "polish failed"))
+            }
+            guard let polished = first["text"] as? String else {
+                return .failure(SidecarError.malformed("missing 'text' in response"))
+            }
+            return .success(PolishResult(
+                text: polished,
+                polished: (first["polished"] as? Bool) ?? true,
+                reason: first["reason"] as? String
+            ))
+        } catch {
+            return .failure(error)
+        }
+    }
+
     // MARK: - Ping
 
     /// Round-trips a ping to confirm the daemon is not just bound to the socket
@@ -91,7 +142,7 @@ actor SidecarClient {
     /// instead of blocking the caller.
     func ping() async -> Bool {
         do {
-            let frames = try sendRequest(
+            let frames = try await sendRequestOffActor(
                 header: ["cmd": "ping"], audio: nil, expectMultiFrame: false, recvTimeout: 5
             )
             return (frames.first?["event"] as? String) == "pong"
@@ -108,11 +159,20 @@ actor SidecarClient {
         let sizeMB: Int
         let multilingual: Bool
         let backend: String
+        /// "speech" or "polish". Older daemons don't send it; those only ever
+        /// knew about speech models, so that is the safe default.
+        let kind: String
+        /// Bytes already on disk, partial downloads included, so leftover data
+        /// from an interrupted attempt can be shown and reclaimed.
+        let onDiskMB: Int
+        /// A download the daemon is running right now, whether or not this app
+        /// launch is the one that started it.
+        let downloading: Bool
     }
 
     func listModels() async -> Result<[RemoteModelStatus], Error> {
         do {
-            let frames = try sendRequest(
+            let frames = try await sendRequestOffActor(
                 header: ["cmd": "models"], audio: nil, expectMultiFrame: false, recvTimeout: 60
             )
             guard let first = frames.first,
@@ -126,7 +186,10 @@ actor SidecarClient {
                     downloaded: (dict["downloaded"] as? Bool) ?? false,
                     sizeMB: (dict["sizeMB"] as? Int) ?? 0,
                     multilingual: (dict["multilingual"] as? Bool) ?? false,
-                    backend: (dict["backend"] as? String) ?? "parakeet"
+                    backend: (dict["backend"] as? String) ?? "parakeet",
+                    kind: (dict["kind"] as? String) ?? "speech",
+                    onDiskMB: (dict["onDiskMB"] as? Int) ?? 0,
+                    downloading: (dict["downloading"] as? Bool) ?? false
                 )
             }
             return .success(parsed)
@@ -139,7 +202,7 @@ actor SidecarClient {
 
     func deleteModel(modelId: String) async -> Result<Void, Error> {
         do {
-            let frames = try sendRequest(
+            let frames = try await sendRequestOffActor(
                 header: ["cmd": "delete", "model": modelId],
                 audio: nil,
                 expectMultiFrame: false,
@@ -169,7 +232,7 @@ actor SidecarClient {
             // download, so a 60s per-recv timeout resets on each frame and only
             // trips on a genuine stall (no frame for 60s) rather than hanging
             // forever on a dead connection.
-            let frames = try sendRequest(
+            let frames = try await sendRequestOffActor(
                 header: ["cmd": "prefetch", "model": modelId],
                 audio: nil,
                 expectMultiFrame: true,
@@ -211,7 +274,52 @@ actor SidecarClient {
     ///   daemon accepts the connection but never replies (wedged mid-request),
     ///   recv unblocks with `.timedOut` instead of hanging forever. Pass 0 to
     ///   disable (used for prefetch, whose downloads legitimately run long).
-    private func sendRequest(
+    /// Runs `sendRequest` off the actor, on a background thread.
+    ///
+    /// `sendRequest` is a blocking recv loop with no suspension point in it, so
+    /// calling it directly from an actor-isolated method pins the actor for the
+    /// whole request. For a `prefetch` that meant one shared `SidecarClient`
+    /// was held for the entire length of a multi-gigabyte download: a second
+    /// model's download never opened a socket, Delete on an unrelated model did
+    /// nothing at all, and `listModels` refreshes were frozen until the download
+    /// ended. A cooperative thread is no better a place to park for minutes, so
+    /// this hops to a global queue and suspends properly while it waits.
+    private nonisolated func sendRequestOffActor(
+        header: [String: Any],
+        audio: Data?,
+        expectMultiFrame: Bool,
+        recvTimeout: TimeInterval = 0,
+        onFrame: (@Sendable (_ frame: [String: Any]) -> Void)? = nil
+    ) async throws -> [[String: Any]] {
+        let box = UncheckedBox(header: header, audio: audio, onFrame: onFrame)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let frames = try self.sendRequest(
+                        header: box.header,
+                        audio: box.audio,
+                        expectMultiFrame: expectMultiFrame,
+                        recvTimeout: recvTimeout,
+                        onFrame: box.onFrame
+                    )
+                    continuation.resume(returning: frames)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// `[String: Any]` headers aren't Sendable and can't be made so without
+    /// reworking the wire format. They are constructed locally, handed over
+    /// once, and never touched again by the caller.
+    private struct UncheckedBox: @unchecked Sendable {
+        let header: [String: Any]
+        let audio: Data?
+        let onFrame: ((_ frame: [String: Any]) -> Void)?
+    }
+
+    private nonisolated func sendRequest(
         header: [String: Any],
         audio: Data?,
         expectMultiFrame: Bool,
@@ -285,7 +393,7 @@ actor SidecarClient {
         return frames
     }
 
-    private func bigEndianBytes(_ value: UInt32) -> [UInt8] {
+    private nonisolated func bigEndianBytes(_ value: UInt32) -> [UInt8] {
         [
             UInt8((value >> 24) & 0xff),
             UInt8((value >> 16) & 0xff),
@@ -294,7 +402,7 @@ actor SidecarClient {
         ]
     }
 
-    private func sendAll(fd: Int32, data: Data) throws {
+    private nonisolated func sendAll(fd: Int32, data: Data) throws {
         try data.withUnsafeBytes { raw in
             var sent = 0
             while sent < data.count {
@@ -310,7 +418,7 @@ actor SidecarClient {
         }
     }
 
-    private func recvExact(fd: Int32, count: Int) throws -> Data {
+    private nonisolated func recvExact(fd: Int32, count: Int) throws -> Data {
         var data = Data(count: count)
         try data.withUnsafeMutableBytes { raw in
             var got = 0
@@ -333,7 +441,7 @@ actor SidecarClient {
 
     /// Like recvExact, but returns nil on clean EOF before reading any byte
     /// (used to detect end of multi-frame stream).
-    private func recvExactOrNil(fd: Int32, count: Int) throws -> Data? {
+    private nonisolated func recvExactOrNil(fd: Int32, count: Int) throws -> Data? {
         var data = Data(count: count)
         var clean = false
         try data.withUnsafeMutableBytes { raw in

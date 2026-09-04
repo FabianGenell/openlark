@@ -1,7 +1,45 @@
+import AppKit
 import SwiftUI
 
 struct OverlayView: View {
     @ObservedObject var model: OverlayModel
+
+    private var statusLabel: String {
+        switch model.phase {
+        case .listening: return "Voice"
+        case .transcribing: return "Transcribing…"
+        case .polishing: return "Polishing…"
+        }
+    }
+
+    /// While listening with polish on, the word is replaced by the profile
+    /// picker: which profile is about to run is the useful thing to say there,
+    /// and it's the fastest place to change your mind. The two swap with a
+    /// spring so the bar reads as one control changing shape rather than two
+    /// controls appearing and disappearing.
+    @ViewBuilder
+    private var label: some View {
+        if model.phase == .listening && model.polishOn && model.polishReady && !model.profileNames.isEmpty {
+            ProfilePicker(
+                names: model.profileNames,
+                active: model.activeProfile,
+                onSelect: { model.onSelectProfile?($0) },
+                hostWindow: model.hostWindow
+            )
+            .transition(.asymmetric(
+                insertion: .scale(scale: 0.85, anchor: .leading).combined(with: .opacity),
+                removal: .scale(scale: 0.85, anchor: .leading).combined(with: .opacity)
+            ))
+        } else {
+            Text(statusLabel)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(.white.opacity(0.85))
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.85, anchor: .leading).combined(with: .opacity),
+                    removal: .scale(scale: 0.85, anchor: .leading).combined(with: .opacity)
+                ))
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -12,13 +50,11 @@ struct OverlayView: View {
                 .padding(.top, 10)
 
             HStack(spacing: 10) {
-                Image(systemName: "mic.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
+                PolishToggle(isOn: model.polishOn, isReady: model.polishReady) {
+                    model.onTogglePolish?()
+                }
 
-                Text(model.isProcessing ? "Transcribing…" : "Voice")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
+                label
 
                 Spacer()
 
@@ -38,6 +74,8 @@ struct OverlayView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: model.polishOn)
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: model.phase)
             .background(Color.black.opacity(0.55))
             .overlay(alignment: .top) {
                 Rectangle()
@@ -58,6 +96,118 @@ struct OverlayView: View {
         // rather than being cropped to the same rounded rect.
         .shadow(color: .black.opacity(0.28), radius: 12, x: 0, y: 5)
         .padding(20)
+    }
+}
+
+/// The mic glyph, doubling as the polish switch.
+///
+/// One glyph swaps for the other: a mic while polish is off, a sparkle in the
+/// polish hue while it's on. Nothing is layered, nothing is framed, and both
+/// symbols occupy the same 12pt box, so the row never shifts and the glyph
+/// stays where the eye already expects it.
+///
+/// Hover is a brightness lift rather than a background. A plate behind an icon
+/// this small reads as a second object and pads the bar out; the lift still
+/// says "pressable" and draws nothing at rest.
+private struct PolishToggle: View {
+    let isOn: Bool
+    let isReady: Bool
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    private var armed: Bool { isOn && isReady }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isOn ? "sparkle" : "mic.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 14, height: 16)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .animation(.easeOut(duration: 0.12), value: isOn)
+        .animation(.easeOut(duration: 0.12), value: isReady)
+        .help(helpText)
+        .accessibilityLabel(isOn ? "Turn polish off" : "Turn polish on")
+    }
+
+    private var helpText: String {
+        if !isOn { return "Polish is off. Click to turn it on." }
+        if !isReady { return "This profile's polish model isn't downloaded yet, so this dictation won't be polished." }
+        return "Polish is on. Click to turn it off."
+    }
+
+    /// Switched on without a model is drawn in the plain text ramp, not the
+    /// polish hue. The colour is the promise that polish will run.
+    private var tint: Color {
+        if armed {
+            return hovered ? Theme.Meta.polish : Theme.Meta.polish.opacity(0.88)
+        }
+        return .white.opacity(hovered ? 1 : (isOn ? 0.5 : 0.85))
+    }
+}
+
+/// The profile dropdown that stands in for the status word while polish is
+/// armed.
+///
+/// A plain button over `PopupMenu`, rather than a SwiftUI `Menu`; see
+/// MenuPopup.swift for why every macOS menu style was unusable here.
+private struct ProfilePicker: View {
+    let names: [String]
+    let active: String
+    let onSelect: (Int) -> Void
+    let hostWindow: (() -> NSWindow?)?
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: popUp) {
+            HStack(spacing: 5) {
+                Text(active)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .opacity(0.7)
+            }
+            .foregroundStyle(.white.opacity(hovered ? 1 : 0.88))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3.5)
+            // No plate at rest, light or dark: an outline alone is enough to
+            // say "control" on a surface this dark, and any fill reads as a
+            // second panel sitting on the bar. The fill only shows on hover.
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(hovered ? 0.10 : 0))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(.white.opacity(hovered ? 0.28 : 0.16), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .help("Polish profile")
+        .accessibilityLabel("Polish profile: \(active)")
+    }
+
+    private func popUp() {
+        PopupMenu.show(
+            names.enumerated().map { index, name in
+                PopupMenuItem(
+                    title: name,
+                    isOn: name == active,
+                    action: { onSelect(index) }
+                )
+            },
+            over: hostWindow?()
+        )
     }
 }
 

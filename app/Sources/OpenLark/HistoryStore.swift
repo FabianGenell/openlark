@@ -8,19 +8,31 @@ struct TranscriptEntry: Codable, Identifiable, Hashable {
     /// Frontmost-app name at the moment the recording was completed, if known.
     /// Optional for backward-compat, entries created before this field decode as nil.
     let appName: String?
+    /// What the speech model produced, before polish rewrote it. Nil when the
+    /// dictation wasn't polished, or when polish was discarded and `text` is
+    /// already the raw transcript - in both cases there is only one version.
+    let originalText: String?
+    /// Profile that polished it, for the badge.
+    let polishProfile: String?
+
+    var wasPolished: Bool { originalText != nil }
 
     init(
         id: UUID = UUID(),
         text: String,
         timestamp: Date = Date(),
         durationSeconds: Double,
-        appName: String? = nil
+        appName: String? = nil,
+        originalText: String? = nil,
+        polishProfile: String? = nil
     ) {
         self.id = id
         self.text = text
         self.timestamp = timestamp
         self.durationSeconds = durationSeconds
         self.appName = appName
+        self.originalText = originalText
+        self.polishProfile = polishProfile
     }
 
     var wordCount: Int {
@@ -95,14 +107,26 @@ final class HistoryStore: ObservableObject {
         loadTotals()
     }
 
-    func add(text: String, durationSeconds: Double, appName: String? = nil) {
+    func add(
+        text: String,
+        durationSeconds: Double,
+        appName: String? = nil,
+        originalText: String? = nil,
+        polishProfile: String? = nil
+    ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        // Only keep the original when polish actually changed something;
+        // an identical pair would just be a toggle that does nothing.
+        let original = originalText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keptOriginal = (original?.isEmpty == false && original != trimmed) ? original : nil
         entries.insert(
             TranscriptEntry(
                 text: trimmed,
                 durationSeconds: durationSeconds,
-                appName: appName
+                appName: appName,
+                originalText: keptOriginal,
+                polishProfile: keptOriginal == nil ? nil : polishProfile
             ),
             at: 0
         )

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Local-dev helper: pip-installs mlx-whisper + huggingface_hub into the
+# Local-dev helper: pip-installs the current sidecar dependency set into the
 # already-installed runtime under ~/Library/Application Support/OpenLark/runtime,
-# so you can test the multi-model wire protocol before publishing a new
-# runtime-vN bundle to GitHub.
+# so you can test server.py changes before publishing a new runtime-vN bundle
+# to GitHub.
 #
 # In a real release, build-runtime-bundle.sh bakes these in and the user
-# downloads everything as one tarball. This script is only for the gap
-# between "code changes" and "new bundle published".
+# downloads everything as one tarball. This script is only for the gap between
+# "code changes" and "new bundle published".
 
 set -euo pipefail
 
@@ -19,11 +19,12 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
-echo "› installing mlx-whisper + huggingface_hub…"
+echo "› installing mlx-whisper + mlx-lm + huggingface_hub…"
 # --no-cache-dir avoids tripping over pip's stripped-down cachecontrol module
 # (build-runtime-bundle.sh deletes pip caches to slim the tarball).
 "$PYTHON" -m pip install --no-cache-dir --prefer-binary \
     "mlx-whisper>=0.4.2" \
+    "mlx-lm>=0.28" \
     "huggingface_hub>=0.24"
 
 echo "› restarting the OpenLark daemon so it picks up the new server.py + deps…"
