@@ -45,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this before touching anything, so a superseded run can't hide the
     /// overlay of the recording that replaced it or paste its stale text.
     private var runGeneration = 0
+    /// The transcript as dictated, held while polish runs so "Use original"
+    /// has something to hand over without waiting for the pass to finish.
+    private var pendingUnpolished: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.log("app launched, pid=\(ProcessInfo.processInfo.processIdentifier)")
@@ -70,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         AppLogger.log("mic permission at launch: status=\(micStatus.rawValue)")
 
+        installMainMenu()
         setupMenuBar()
         overlayController = OverlayWindowController()
         overlayController.audioLevelProvider = { [weak self] in
@@ -78,6 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayController.onTogglePolish = { [weak self] in
             guard let self else { return }
             self.setPolish(enabled: !self.polishRequested)
+        }
+        overlayController.onSkipPolish = { [weak self] in
+            self?.skipPolish()
         }
         overlayController.onSelectProfile = { [weak self] index in
             guard let self else { return }
@@ -132,6 +139,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    /// A main menu, purely so text fields get the standard editing shortcuts.
+    ///
+    /// ⌘A, ⌘C, ⌘V, ⌘X and ⌘Z are not built into NSTextField; they are key
+    /// equivalents on the application's Edit menu, which dispatches them down
+    /// the responder chain. An .accessory app has no main menu by default, so
+    /// every text field in Settings silently ignored all of them - you could
+    /// type into the polish instructions but not paste a prompt into them.
+    ///
+    /// Nothing here is ever displayed: an .accessory app shows no menu bar.
+    /// The menu exists only so the key equivalents resolve.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        // macOS treats the first item as the application menu. It stays empty;
+        // its only job is to hold the conventional first slot.
+        mainMenu.addItem(NSMenuItem())
+
+        let editItem = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
+        mainMenu.addItem(editItem)
+
+        // ⌘W to close Settings or History, which an accessory app also lacks.
+        let windowItem = NSMenuItem()
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = window
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
     }
 
     private var micMenu: NSMenu!
@@ -558,7 +605,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopAndTranscribe() {
         guard state == .recording else { return }
-        removeEscMonitor()
+        // The Esc tap stays armed through transcription and polish. Those are
+        // the seconds where a dictation is most obviously not wanted any more -
+        // long enough to change your mind, and until now the only key that did
+        // anything was one that started a new recording.
         removeMaxDurationTimer()
         state = .transcribing
         overlayController.setTranscribing()
@@ -594,27 +644,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let unpolished = corrected
                 var profileUsed: String?
                 if self.polishRequested, !corrected.isEmpty {
+                    self.pendingUnpolished = unpolished
+                    EscEventTap.shared.setSkipArmed(true)
                     self.overlayController.setPolishing()
                     profileUsed = self.polishProfiles.active?.name
                     corrected = await self.polished(corrected)
                     // Polish is another second or two of waiting, so check again.
+                    // "Use original" bumps the generation too, having already
+                    // delivered the raw transcript itself.
                     guard generation == self.runGeneration else {
                         AppLogger.log("discarding superseded polish (generation \(generation))")
                         return
                     }
+                    EscEventTap.shared.setSkipArmed(false)
+                    self.pendingUnpolished = nil
                 }
                 self.overlayController.hide()
-                if !corrected.isEmpty {
-                    let duration = self.recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-                    self.history.add(
-                        text: corrected,
-                        durationSeconds: duration,
-                        appName: self.recordingFrontmostApp,
-                        originalText: unpolished,
-                        polishProfile: profileUsed
-                    )
-                    self.injector.inject(text: corrected)
-                }
+                self.deliver(text: corrected, original: unpolished, profile: profileUsed)
             case .failure(let err):
                 self.overlayController.hide()
                 AppLogger.log("transcription failed: \(err)")
@@ -638,11 +684,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     break
                 }
             }
+            self.removeEscMonitor()
+            EscEventTap.shared.setSkipArmed(false)
             self.recordingStartedAt = nil
             self.recordingFrontmostApp = nil
             self.runGeneration &+= 1
             self.state = .idle
         }
+    }
+
+    /// Hands a finished transcript to history and to the focused app. One
+    /// place, so skipping polish lands exactly the way finishing it does.
+    private func deliver(text: String, original: String, profile: String?) {
+        guard !text.isEmpty else { return }
+        let duration = recordingStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        history.add(
+            text: text,
+            durationSeconds: duration,
+            appName: recordingFrontmostApp,
+            originalText: original,
+            polishProfile: profile
+        )
+        injector.inject(text: text)
+    }
+
+    /// Take the dictation as spoken and abandon the polish in flight.
+    ///
+    /// The polish request can't be recalled from the daemon, so it runs to
+    /// completion and its result is discarded by the generation check. What
+    /// matters is that the text lands now rather than in two seconds.
+    private func skipPolish() {
+        guard state == .transcribing, let text = pendingUnpolished else { return }
+        AppLogger.log("polish skipped, delivering the transcript as dictated")
+        runGeneration &+= 1
+        EscEventTap.shared.setSkipArmed(false)
+        pendingUnpolished = nil
+        removeEscMonitor()
+        overlayController.hide()
+        deliver(text: text, original: text, profile: nil)
+        recordingStartedAt = nil
+        recordingFrontmostApp = nil
+        state = .idle
     }
 
     /// Runs the polish pass, and returns the input untouched if anything at
@@ -655,7 +737,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             text: text,
             modelId: modelId,
             instruction: PolishProfileStore.shared.activeInstruction,
-            temperature: PolishProfileStore.shared.activeTemperature
+            temperature: PolishProfileStore.shared.activeTemperature,
+            onProgress: { [weak self] value in
+                Task { @MainActor in self?.overlayController.setPolishProgress(value) }
+            }
         )
         switch result {
         case .success(let polish):
@@ -697,6 +782,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Esc, at any point between starting a recording and the text landing.
+    ///
+    /// While transcribing or polishing there is nothing to stop on the daemon
+    /// side - the request is already in flight and the socket read can't be
+    /// interrupted from here - so cancelling means the result is discarded
+    /// rather than never produced. Bumping the generation is what does it: the
+    /// in-flight task checks it before touching the overlay or pasting, so it
+    /// returns quietly instead of typing into whatever you moved on to.
     private func cancel() {
         // Esc arrives through a CGEventTap that defers to the main queue, so a
         // press in the same run-loop turn as the stop hotkey lands after
@@ -705,11 +798,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // transcription; the user starts a new recording, and the old task then
         // hides the new overlay and pastes its own text.
         guard state != .idle else { return }
+        AppLogger.log("cancelled during \(state)")
         removeEscMonitor()
         removeMaxDurationTimer()
+        EscEventTap.shared.setSkipArmed(false)
         runGeneration &+= 1
+        pendingUnpolished = nil
         recorder.cancel()
         overlayController.hide()
+        recordingStartedAt = nil
+        recordingFrontmostApp = nil
         state = .idle
     }
 
@@ -719,9 +817,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Use a CGEventTap so Esc cancels recording from any app while overlay is up,
         // without us having to register Esc as a global hotkey (which would
         // break Esc behaviour everywhere else).
-        EscEventTap.shared.enable { @Sendable in
-            DispatchQueue.main.async { [weak self] in self?.cancel() }
-        }
+        EscEventTap.shared.enable(
+            onEsc: { @Sendable in
+                DispatchQueue.main.async { [weak self] in self?.cancel() }
+            },
+            onSkip: { @Sendable in
+                DispatchQueue.main.async { [weak self] in self?.skipPolish() }
+            }
+        )
     }
 
     private func removeEscMonitor() {

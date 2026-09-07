@@ -36,6 +36,11 @@ final class OverlayWindowController {
         set { model.onSelectProfile = newValue }
     }
 
+    var onSkipPolish: (() -> Void)? {
+        get { model.onSkipPolish }
+        set { model.onSkipPolish = newValue }
+    }
+
     func setProfiles(_ names: [String], active: String) {
         model.profileNames = names
         model.activeProfile = active
@@ -74,6 +79,10 @@ final class OverlayWindowController {
 
     func setPolishing() {
         model.beginPolishing()
+    }
+
+    func setPolishProgress(_ value: Double) {
+        model.reportPolishProgress(value)
     }
 
     func hide() {
@@ -221,6 +230,8 @@ final class OverlayModel: ObservableObject {
     /// has to say so: claiming polish is armed and then pasting the raw
     /// transcript is the one thing it must never do.
     @Published var polishReady: Bool = true
+    /// 0...1 through the polish pass, used to fill the waveform.
+    @Published var polishProgress: Double = 0
     /// Profile names and which one is live, so the pill can switch profile
     /// mid-recording without the overlay knowing about the store.
     @Published var profileNames: [String] = []
@@ -228,6 +239,7 @@ final class OverlayModel: ObservableObject {
     var levelProvider: (() -> Float)?
     var onTogglePolish: (() -> Void)?
     var onSelectProfile: ((Int) -> Void)?
+    var onSkipPolish: (() -> Void)?
     /// The panel the pill is drawn in, so a menu popped from it can duck under
     /// the panel's window level for as long as it's up.
     var hostWindow: (() -> NSWindow?)?
@@ -236,6 +248,10 @@ final class OverlayModel: ObservableObject {
 
     private var timer: Timer?
     private var processingPhase: Double = 0
+    private var polishStartedAt: Date?
+    /// Time constant for the reading ramp, from the measured gap before the
+    /// first token lands.
+    private static let promptRampSeconds = 0.7
 
     func start() {
         phase = .listening
@@ -257,6 +273,23 @@ final class OverlayModel: ObservableObject {
     /// between two stages of the same wait.
     func beginPolishing() {
         phase = .polishing
+        polishProgress = 0
+        polishStartedAt = Date()
+    }
+
+    /// Token progress, mapped into the back end of the bar.
+    ///
+    /// Measured, about half of a polish elapses before the first token: the
+    /// model is reading the system prompt, the worked example and the
+    /// transcript. A bar driven purely by tokens therefore sits at zero for
+    /// half the wait and then races, which reads as broken. The front of the
+    /// bar is the reading, eased in on a timer; the back is the writing, driven
+    /// by real tokens.
+    static let promptShare = 0.45
+
+    func reportPolishProgress(_ value: Double) {
+        let mapped = Self.promptShare + min(1, max(0, value)) * (1 - Self.promptShare)
+        polishProgress = max(polishProgress, mapped)
     }
 
     func stop() {
@@ -281,12 +314,22 @@ final class OverlayModel: ObservableObject {
         }
     }
 
+    /// Eases toward `promptShare` without ever reaching it, so the bar is
+    /// moving while the model reads but never claims the reading is finished.
+    private func advancePromptRamp() {
+        guard phase == .polishing, let started = polishStartedAt else { return }
+        let elapsed = Date().timeIntervalSince(started)
+        let eased = Self.promptShare * (1 - exp(-elapsed / Self.promptRampSeconds))
+        polishProgress = max(polishProgress, eased)
+    }
+
     private func startProcessingTimer() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.processingPhase += 0.14
+                self.advancePromptRamp()
                 let count = self.levels.count
                 var next = [Float](repeating: 0, count: count)
                 // Two travelling sine waves crossed, a gentle "thinking" pulse.

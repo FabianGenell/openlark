@@ -41,9 +41,44 @@ struct OverlayView: View {
         }
     }
 
+    /// Only the controls that do something in the current phase. The keycaps
+    /// used to stay on screen through transcription with their labels blanked,
+    /// advertising shortcuts that did nothing.
+    ///
+    /// Split out of the bar's HStack because the compiler could not type-check
+    /// the whole row once it carried conditionals.
+    @ViewBuilder
+    private var trailingControls: some View {
+        if model.phase == .listening {
+            Text("Stop")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.7))
+            KeyCap(symbol: "command")
+            KeyCap(symbol: "arrow.up")
+        }
+
+        if model.phase == .polishing {
+            SkipPolishButton { model.onSkipPolish?() }
+        }
+
+        Text("Cancel")
+            .font(.system(size: 13))
+            .foregroundStyle(.white.opacity(0.7))
+            .padding(.leading, model.phase == .listening ? 6 : 0)
+
+        KeyCap(text: "esc")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            WaveformBars(levels: model.levels)
+            // While polishing, the same bars carry the progress: everything up
+            // to the fraction takes the polish hue, the rest stays grey. It
+            // reuses the one element already on the pill instead of adding a
+            // second bar under it.
+            WaveformBars(
+                levels: model.levels,
+                progress: model.phase == .polishing ? model.polishProgress : nil
+            )
                 .frame(maxWidth: .infinity)
                 .frame(height: 52)
                 .padding(.horizontal, 20)
@@ -58,19 +93,7 @@ struct OverlayView: View {
 
                 Spacer()
 
-                Text(model.isProcessing ? "" : "Stop")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.7))
-
-                KeyCap(symbol: "command")
-                KeyCap(symbol: "arrow.up")
-
-                Text(model.isProcessing ? "" : "Cancel")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.leading, 6)
-
-                KeyCap(text: "esc")
+                trailingControls
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
@@ -151,6 +174,45 @@ private struct PolishToggle: View {
     }
 }
 
+/// Takes the transcript as dictated and abandons the polish.
+///
+/// By the time this is on screen the raw transcript already exists - polish is
+/// a second pass over text the speech model has already produced - so this is
+/// just a matter of taking it. Useful when polish was on by accident and the
+/// wait is pure cost.
+private struct SkipPolishButton: View {
+    let action: () -> Void
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text("Use original")
+                    .font(.system(size: 12, weight: .medium))
+                KeyCap(text: "tab")
+            }
+                .foregroundStyle(.white.opacity(hovered ? 1 : 0.75))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(.white.opacity(hovered ? 0.12 : 0))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(.white.opacity(hovered ? 0.3 : 0.18), lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .help("Tab. Paste the transcript as dictated, without waiting for polish.")
+        .accessibilityLabel("Use the original transcript")
+    }
+}
+
 /// The profile dropdown that stands in for the status word while polish is
 /// armed.
 ///
@@ -213,21 +275,32 @@ private struct ProfilePicker: View {
 
 struct WaveformBars: View {
     let levels: [Float]
+    /// 0...1 to colour the leading bars, nil to leave every bar plain.
+    var progress: Double? = nil
 
     var body: some View {
         GeometryReader { geo in
             HStack(alignment: .center, spacing: 2) {
-                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                ForEach(Array(levels.enumerated()), id: \.offset) { index, level in
                     let h = max(2, CGFloat(level) * geo.size.height)
                     let opacity = 0.35 + 0.65 * Double(level)
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(.white.opacity(opacity))
+                        .fill(fill(at: index, opacity: opacity))
                         .frame(width: 3, height: h)
                         .frame(maxHeight: .infinity)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
+            .animation(.easeOut(duration: 0.25), value: progress)
         }
+    }
+
+    private func fill(at index: Int, opacity: Double) -> Color {
+        guard let progress else { return .white.opacity(opacity) }
+        let position = Double(index) / Double(max(1, levels.count - 1))
+        return position <= progress
+            ? Theme.Meta.polish.opacity(0.55 + 0.45 * opacity)
+            : .white.opacity(opacity * 0.45)
     }
 }
 

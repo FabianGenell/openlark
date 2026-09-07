@@ -1,8 +1,9 @@
 import AppKit
 
-/// Captures the Escape key globally while recording, without needing to register
-/// it as a permanent global hotkey. Requires Input Monitoring or Accessibility
-/// permission (the system prompts the first time the tap is created).
+/// Captures Escape, and Tab while polish is running, globally and without
+/// registering either as a permanent hotkey. Requires Input Monitoring or
+/// Accessibility permission (the system prompts the first time the tap is
+/// created).
 final class EscEventTap: @unchecked Sendable {
     static let shared = EscEventTap()
 
@@ -10,10 +11,29 @@ final class EscEventTap: @unchecked Sendable {
     private var runLoopSource: CFRunLoopSource?
     private let lock = NSLock()
     private var onEsc: (() -> Void)?
+    private var onSkip: (() -> Void)?
+    private var skipArmed = false
 
-    func enable(onEsc: @escaping @Sendable () -> Void) {
+    /// Arms Tab, for the second or two the polish pass is running.
+    ///
+    /// Tab is swallowed only in that window, and only while the overlay is
+    /// showing "Use original", so the key keeps its normal meaning everywhere
+    /// else. That window is also the one moment the key is safe to take: the
+    /// dictation is already finished and the user is waiting for text to land,
+    /// not tabbing between fields.
+    func setSkipArmed(_ armed: Bool) {
+        lock.lock()
+        skipArmed = armed
+        lock.unlock()
+    }
+
+    func enable(
+        onEsc: @escaping @Sendable () -> Void,
+        onSkip: @escaping @Sendable () -> Void
+    ) {
         lock.lock()
         self.onEsc = onEsc
+        self.onSkip = onSkip
         let alreadyActive = tap != nil
         lock.unlock()
         if alreadyActive { return }
@@ -63,6 +83,8 @@ final class EscEventTap: @unchecked Sendable {
         self.tap = nil
         self.runLoopSource = nil
         self.onEsc = nil
+        self.onSkip = nil
+        self.skipArmed = false
         lock.unlock()
 
         if let tap {
@@ -91,6 +113,16 @@ final class EscEventTap: @unchecked Sendable {
             lock.unlock()
             cb?()
             return nil // swallow
+        }
+        if keyCode == 48 /* Tab */ {
+            lock.lock()
+            let armed = skipArmed
+            let cb = onSkip
+            lock.unlock()
+            if armed {
+                cb?()
+                return nil // swallow
+            }
         }
         return Unmanaged.passUnretained(event)
     }

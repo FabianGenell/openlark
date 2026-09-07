@@ -578,6 +578,36 @@ def sanitize_polish(out: str, original: str) -> str:
     return out
 
 
+def stream_polish(
+    stream_generate,
+    model,
+    tokenizer,
+    *,
+    prompt,
+    expected_tokens: int,
+    on_progress,
+    max_tokens: int,
+    sampler,
+) -> str:
+    """Generate, reporting a fraction as tokens arrive.
+
+    There is no true percentage for a language model - it stops when it stops.
+    What there is, for this task, is a reliable expectation of how long the
+    answer will be, because the answer is a tidied copy of the input.
+    """
+    pieces: list[str] = []
+    produced = 0
+    for response in stream_generate(
+        model, tokenizer, prompt, max_tokens=max_tokens, sampler=sampler
+    ):
+        pieces.append(response.text)
+        produced += 1
+        # Every few tokens, not every one: the frame costs more than the token.
+        if on_progress is not None and produced % 6 == 0:
+            on_progress(min(0.97, produced / expected_tokens))
+    return "".join(pieces)
+
+
 def polish_looks_wrong(original: str, polished: str, lenient: bool = False) -> Optional[str]:
     """Reason to discard a polish result, or None if it looks like an edit.
 
@@ -623,6 +653,7 @@ def polish(
     text: str,
     instruction: str = "",
     temperature: float = 0.0,
+    on_progress=None,
 ) -> tuple[str, Optional[str]]:
     """Return (text, discard_reason). On a discard the ORIGINAL text comes back.
 
@@ -633,18 +664,31 @@ def polish(
     if not original:
         return original, None
 
-    from mlx_lm import generate
+    from mlx_lm import stream_generate
     from mlx_lm.sample_utils import make_sampler
 
     model, tokenizer = load_llm(model_id)
     prompt = build_polish_prompt(tokenizer, original, instruction)
     word_count = len(original.split())
 
+    # Polish is close to length-preserving by construction - that is exactly
+    # what the discard check downstream asserts - so the transcript's own token
+    # count is a good estimate of how many tokens are coming back. Not exact,
+    # hence the cap below 1: better a bar that arrives slightly early than one
+    # that sits at 100% while the model is still writing.
+    try:
+        expected_tokens = max(8, len(tokenizer.encode(original)))
+    except Exception:  # noqa: BLE001 - estimate only, never worth failing over
+        expected_tokens = max(8, int(word_count * 1.4))
+
     t0 = time.perf_counter()
-    raw = generate(
+    raw = stream_polish(
+        stream_generate,
         model,
         tokenizer,
         prompt=prompt,
+        expected_tokens=expected_tokens,
+        on_progress=on_progress,
         # Headroom for punctuation and paragraph breaks without leaving room
         # for the model to wander off into an essay.
         max_tokens=min(1200, int(word_count * 2.2) + 80),
@@ -667,7 +711,6 @@ def polish(
             temp=temperature,
             min_p=0.05 if temperature > 0 else 0.0,
         ),
-        verbose=False,
     )
     dur = time.perf_counter() - t0
 
@@ -988,8 +1031,17 @@ class Handler(socketserver.BaseRequestHandler):
                 # polish being broken rather than a setting being wrong.
                 temperature = min(1.5, max(0.0, float(header.get("temperature", 0.0) or 0.0)))
                 sock.settimeout(PREFETCH_TIMEOUT_S)
+
+                def report(value: float) -> None:
+                    # Runs on the inference thread; the handler thread is parked
+                    # on the reply queue and isn't touching the socket. A client
+                    # that has gone away raises here and abandons the polish,
+                    # which is the right outcome since nobody is waiting for it.
+                    send_frame(sock, {"event": "progress", "value": value})
+
                 polished, reason = run_on_inference_thread(
-                    lambda: polish(model_id, text, instruction, temperature), deadline
+                    lambda: polish(model_id, text, instruction, temperature, report),
+                    deadline,
                 )
                 sock.settimeout(SOCKET_TIMEOUT_S)
                 frame: dict[str, Any] = {

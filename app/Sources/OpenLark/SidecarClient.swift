@@ -99,7 +99,8 @@ actor SidecarClient {
         text: String,
         modelId: String,
         instruction: String,
-        temperature: Double
+        temperature: Double,
+        onProgress: (@Sendable (Double) -> Void)? = nil
     ) async -> Result<PolishResult, Error> {
         do {
             let header: [String: Any] = [
@@ -113,10 +114,20 @@ actor SidecarClient {
             // load adds a few more. 90s matches transcribe: well past any
             // healthy path, and under the daemon's own 180s watchdog so the
             // app gives up first and can restart it.
+            // Multi-frame: the daemon streams a fraction as tokens arrive, then
+            // the result. Progress frames are advisory, the last frame is the answer.
             let response = try await sendRequestOffActor(
-                header: header, audio: nil, expectMultiFrame: false, recvTimeout: 90
+                header: header,
+                audio: nil,
+                expectMultiFrame: true,
+                recvTimeout: 90,
+                onFrame: { frame in
+                    guard (frame["event"] as? String) == "progress",
+                          let value = frame["value"] as? Double else { return }
+                    onProgress?(value)
+                }
             )
-            guard let first = response.first else {
+            guard let first = response.last else {
                 return .failure(SidecarError.recvEOF)
             }
             if (first["event"] as? String) == "error" {
