@@ -437,6 +437,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setPolish(enabled: Bool) {
         PolishSettings.polishByDefault = enabled
         overlayController.polishOn = enabled
+        // Re-read the catalogue: a model may have finished downloading, or been
+        // deleted, since the last time the pill was told anything.
+        DownloadedModelsCache.shared.refresh()
         pushProfilesToOverlay()
         AppLogger.log("polish set to \(enabled)")
     }
@@ -451,6 +454,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             polishProfiles.profiles.map(\.name),
             active: polishProfiles.active?.name ?? ""
         )
+        overlayController.polishReady = polishIsUsable
+    }
+
+    /// Whether polish can actually run: the active profile's model has to be
+    /// on disk. Without this the pill showed the armed sparkle regardless, so a
+    /// profile pinned to a model that was never downloaded looked identical to
+    /// a working one and quietly pasted the raw transcript every time.
+    private var polishIsUsable: Bool {
+        DownloadedModelsCache.shared.downloadedIds.contains(polishProfiles.activeModelId)
     }
 
     // MARK: - Copy last transcript
@@ -578,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state = .recording
         recordingStartedAt = Date()
         overlayController.polishOn = polishRequested
+        DownloadedModelsCache.shared.refresh()
         pushProfilesToOverlay()
         overlayController.show()
         installEscMonitor()
@@ -648,7 +661,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     EscEventTap.shared.setSkipArmed(true)
                     self.overlayController.setPolishing()
                     profileUsed = self.polishProfiles.active?.name
-                    corrected = await self.polished(corrected)
+                    corrected = await self.polished(corrected, generation: generation)
                     // Polish is another second or two of waiting, so check again.
                     // "Use original" bumps the generation too, having already
                     // delivered the raw transcript itself.
@@ -731,7 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// all goes wrong. A dictation that reaches the clipboard slightly rough is
     /// a far better outcome than one that doesn't reach it at all, so every
     /// failure here is non-fatal.
-    private func polished(_ text: String) async -> String {
+    private func polished(_ text: String, generation: Int) async -> String {
         let modelId = PolishProfileStore.shared.activeModelId
         let result = await sidecar.polish(
             text: text,
@@ -739,7 +752,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             instruction: PolishProfileStore.shared.activeInstruction,
             temperature: PolishProfileStore.shared.activeTemperature,
             onProgress: { [weak self] value in
-                Task { @MainActor in self?.overlayController.setPolishProgress(value) }
+                Task { @MainActor in
+                    guard let self, generation == self.runGeneration else { return }
+                    // A polish abandoned by Tab or Escape keeps streaming from
+                    // the daemon, and the bar is monotonic, so an unguarded
+                    // frame from the previous dictation would shove the next
+                    // one's progress most of the way to done.
+                    self.overlayController.setPolishProgress(value)
+                }
             }
         )
         switch result {
@@ -769,7 +789,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPolishSetupNoticeOnce() {
         guard !UserDefaults.standard.bool(forKey: Self.polishNoticeShownKey) else { return }
-        UserDefaults.standard.set(true, forKey: Self.polishNoticeShownKey)
 
         let alert = NSAlert()
         alert.messageText = "Polish needs a small model downloaded first"
@@ -777,7 +796,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Not Now")
         NSApp.activate(ignoringOtherApps: true)
+        // Only "Open Settings" retires the notice. Marking it shown before the
+        // modal made "Not Now" mean "never again", which is not what it says.
         if alert.runModal() == .alertFirstButtonReturn {
+            UserDefaults.standard.set(true, forKey: Self.polishNoticeShownKey)
             showSettings(section: .models)
         }
     }

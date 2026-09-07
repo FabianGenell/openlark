@@ -77,6 +77,13 @@ SOCKET_PATH = os.environ.get("OPENLARK_SOCKET", "/tmp/openlark.sock")
 HEADER = struct.Struct(">I")
 SOCKET_TIMEOUT_S = 30.0
 PREFETCH_TIMEOUT_S = 30 * 60  # 30 min, large Whisper models can take a while on slow links
+# Socket timeout while a transcribe or polish job runs. Long enough for a cold
+# model load plus generation, and short enough to stay under the watchdog: the
+# polish progress frames are written from the shared inference thread, so a
+# client that is connected but slow to read would otherwise be able to park that
+# thread on a blocking send until the watchdog force-exits the whole daemon and
+# takes everyone else's dictation with it.
+INFERENCE_TIMEOUT_S = 120.0
 MAX_PAYLOAD_BYTES = 200 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
@@ -558,7 +565,43 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _TRANSCRIPT_TAG_RE = re.compile(r"</?transcript>", re.IGNORECASE)
 # A preamble line the model prepended, e.g. "Here is the cleaned transcript:".
 _PREAMBLE_RE = re.compile(r"\A[^\n]{0,80}:[ \t]*\n+")
-_WORD_RE = re.compile(r"[0-9a-z\u00c0-\u024f]+")
+# Unicode-aware. The previous class was [0-9a-z\u00c0-\u024f], which covers
+# Latin plus Western European accents and nothing else, so a Russian, Greek,
+# Arabic, Hebrew, Thai, Devanagari or CJK transcript tokenised to an empty list.
+# polish_looks_wrong then discarded every result as "empty" regardless of how
+# good it was, silently turning polish into a no-op for most of the 99 languages
+# the Whisper models transcribe. Vietnamese was caught by the same gap: its
+# precomposed characters live in Latin Extended Additional, also outside it.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+def _words(text: str) -> list[str]:
+    """Lowercased word list, with apostrophes closed up first.
+
+    `_WORD_RE` splits on anything non-alphanumeric, so "don't" would come out
+    as "don" + "t" and never match the "dont" in CRITICAL_WORDS - a kept
+    negation would read as a dropped one. Closing the apostrophe first makes
+    "don't", "dont" and "do not" all comparable.
+    """
+    return _WORD_RE.findall(text.lower().replace("\u2019", "").replace("'", ""))
+
+
+# Negations, counted as a group rather than word by word. "don't" becoming
+# "do not" is exactly what a "keep it formal" instruction is supposed to do, so
+# a per-word count would flag the very edit that was asked for. What matters is
+# that the sentence still carries as many negations as it started with.
+NEGATIONS = frozenset({
+    "not", "no", "never", "none", "nothing", "nobody", "neither", "nor",
+    "cannot", "cant", "dont", "doesnt", "didnt", "wont", "wouldnt", "shouldnt",
+    "couldnt", "isnt", "arent", "wasnt", "werent", "havent", "hasnt", "hadnt",
+    "without", "unless",
+})
+
+# Imperatives, counted individually. These have no synonym a cleanup should be
+# reaching for, so losing one means the instruction changed.
+IMPERATIVES = (
+    "remove", "delete", "stop", "cancel", "avoid", "skip", "ignore", "undo",
+    "revert", "exclude", "disable",
+)
 
 
 def sanitize_polish(out: str, original: str) -> str:
@@ -570,7 +613,15 @@ def sanitize_polish(out: str, original: str) -> str:
     out = _THINK_RE.sub("", out)
     out = _TRANSCRIPT_TAG_RE.sub("", out).strip()
     if "\n" in out:
-        out = _PREAMBLE_RE.sub("", out).strip()
+        # Only strip a lead-in the speaker didn't say. Unanchored, this ate the
+        # opening line of any dictation that starts with a heading - "Reminders:"
+        # then the list - and the length check afterwards is far too coarse to
+        # notice one short line missing.
+        candidate = _PREAMBLE_RE.sub("", out).strip()
+        if candidate and candidate != out:
+            dropped = out[: len(out) - len(candidate)].strip().rstrip(":").strip()
+            if dropped.lower() not in original.lower():
+                out = candidate
     # Quotes the speaker did not put there.
     opener, closer = "\"“‘'", "\"”’'"
     if len(out) >= 2 and out[0] in opener and out[-1] in closer and original.strip()[:1] not in opener:
@@ -623,8 +674,8 @@ def polish_looks_wrong(original: str, polished: str, lenient: bool = False) -> O
     throw away exactly the edit that was asked for.
     """
     min_ratio, max_ratio, min_survival = (0.45, 1.8, 0.45) if lenient else (0.55, 1.5, 0.6)
-    src = _WORD_RE.findall(original.lower())
-    dst = _WORD_RE.findall(polished.lower())
+    src = _words(original)
+    dst = _words(polished)
     if not dst:
         return "empty"
 
@@ -644,6 +695,27 @@ def polish_looks_wrong(original: str, polished: str, lenient: bool = False) -> O
         survived = len(src_words & dst_words) / len(src_words)
         if survived < min_survival:
             return f"only {int(survived * 100)}% of the spoken words survived"
+
+    # Load-bearing words, checked individually.
+    #
+    # The two checks above catch a model that went somewhere else entirely.
+    # They cannot catch the edit that actually caused harm here: "remove the
+    # top polish, try it out" came back as "let me try it out", which inverted
+    # an instruction while changing the word count by three and the vocabulary
+    # by almost nothing. Both thresholds passed comfortably, and no realistic
+    # tightening of them would have caught it without discarding good polish.
+    #
+    # So these words are checked by name. Dropping a negation or an imperative
+    # is the difference between "don't ship it" and "ship it", and none of them
+    # is filler that a cleanup has any business removing.
+    src_negations = sum(1 for w in src if w in NEGATIONS)
+    dst_negations = sum(1 for w in dst if w in NEGATIONS)
+    if dst_negations < src_negations:
+        return f"dropped a negation ({src_negations} in, {dst_negations} out)"
+
+    missing = [w for w in IMPERATIVES if src.count(w) > dst.count(w)]
+    if missing:
+        return "dropped " + ", ".join(f'"{w}"' for w in sorted(set(missing)))
 
     return None
 
@@ -739,15 +811,25 @@ def delete_model(model_id: str) -> None:
 
     Refuses to delete the currently-loaded model. Caller must switch first.
     """
-    global _current_model_id, _current_model, _current_llm_id, _current_llm
     spec = spec_for(model_id)
     if spec is None:
         raise ValueError(f"unknown model id: {model_id}")
 
-    # rmtree while snapshot_download is writing into the same folder would race
-    # it, and the download would carry on refilling what was just deleted.
-    if download_in_progress(model_id):
-        raise ValueError(f"{model_id} is downloading; cancel or wait before deleting")
+    # Hold the downloads lock across the check *and* the rmtree. Checking and
+    # then deleting left a window where another connection could start a
+    # download into the very directory being removed - reachable by pressing
+    # Delete and then Download on the same model - leaving a half-deleted,
+    # half-written cache. start_download takes the same lock, so the two are
+    # now mutually exclusive rather than merely tested against each other.
+    with _downloads_lock:
+        state = _downloads.get(model_id)
+        if state is not None and not state.done:
+            raise ValueError(f"{model_id} is downloading; wait for it to finish before deleting")
+        _delete_model_locked(model_id, spec)
+
+
+def _delete_model_locked(model_id: str, spec) -> None:
+    global _current_model_id, _current_model, _current_llm_id, _current_llm
 
     if _current_model_id == model_id:
         # Unload first. Python keeps file handles on .safetensors that
@@ -951,7 +1033,19 @@ class Handler(socketserver.BaseRequestHandler):
         try:
             header = recv_header(sock)
         except Exception as exc:
+            # Every other failure in this handler answers with an error frame.
+            # This one used to close the connection in silence, so an
+            # over-long dictation (the transcript rides in the header) looked
+            # to the app like the daemon had died.
             log(f"bad header: {exc}")
+            try:
+                send_frame(sock, {
+                    "event": "error",
+                    "message": f"malformed or oversized request: {exc}",
+                    "code": "bad_request",
+                })
+            except OSError:
+                pass
             return
 
         cmd = header.get("cmd", "transcribe")  # default for forward-compat with the simplest clients
@@ -1030,7 +1124,7 @@ class Handler(socketserver.BaseRequestHandler):
                 # as gibberish that the guard then throws away, which looks like
                 # polish being broken rather than a setting being wrong.
                 temperature = min(1.5, max(0.0, float(header.get("temperature", 0.0) or 0.0)))
-                sock.settimeout(PREFETCH_TIMEOUT_S)
+                sock.settimeout(INFERENCE_TIMEOUT_S)
 
                 def report(value: float) -> None:
                     # Runs on the inference thread; the handler thread is parked
@@ -1072,7 +1166,7 @@ class Handler(socketserver.BaseRequestHandler):
                 audio, sr = read_wav_to_float32(wav_bytes)
                 # A cached model load still costs a couple seconds - extend the
                 # socket timeout while loading + transcribing (watchdog covers it).
-                sock.settimeout(PREFETCH_TIMEOUT_S)
+                sock.settimeout(INFERENCE_TIMEOUT_S)
                 text = run_on_inference_thread(
                     lambda: transcribe(model_id, languages, audio, sr), deadline
                 )

@@ -110,6 +110,11 @@ final class DownloadedModelsCache: ObservableObject {
                 lastError = error
             }
             guard let error = lastError, Self.isWorthRetrying(error) else { break }
+            // Start the estimate over: readings from the attempt that just
+            // failed would otherwise be averaged into the retry's first few.
+            samples[modelId] = nil
+            etaSeconds[modelId] = nil
+            progress[modelId] = 0
             if attempt < Self.retryAttempts {
                 AppLogger.log("download \(modelId) dropped (\(error)), retrying \(attempt + 1)/\(Self.retryAttempts)")
                 try? await Task.sleep(for: Self.retryDelay)

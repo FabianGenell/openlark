@@ -114,7 +114,16 @@ final class PolishProfileStore: ObservableObject {
 
     func update(_ profile: PolishProfile) {
         guard let idx = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
-        profiles[idx] = profile
+        var updated = profile
+        // Renaming went through no uniqueness check, so two profiles could end
+        // up with the same name and become indistinguishable in the menu bar
+        // and the pill's dropdown, where there is no other detail to tell them
+        // apart. Only nudge on an actual collision, so typing a name that
+        // passes through another one on the way doesn't get mangled.
+        if profiles.contains(where: { $0.id != profile.id && $0.name == profile.name }) {
+            updated.name = uniqueName(from: profile.name)
+        }
+        profiles[idx] = updated
         save()
     }
 

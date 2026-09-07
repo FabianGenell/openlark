@@ -62,8 +62,8 @@ struct HistoryView: View {
                             HistoryRow(
                                 entry: entry,
                                 isCopied: copiedID == entry.id,
-                                onCopy: { copy(entry) },
-                                onPaste: { paste(entry) },
+                                onCopy: { copy(entry, text: $0) },
+                                onPaste: { paste(entry, text: $0) },
                                 onDelete: { store.remove(entry) }
                             )
                             if entry.id != filtered.last?.id {
@@ -125,21 +125,25 @@ struct HistoryView: View {
         .padding(.vertical, 60)
     }
 
-    private func copy(_ entry: TranscriptEntry) {
+    /// `text` is whichever version the row is showing. Copying always took the
+    /// polished text, so flipping a row to Original to check what you actually
+    /// said and then copying handed you the polished version anyway, which is
+    /// the one workflow the toggle exists for.
+    private func copy(_ entry: TranscriptEntry, text: String) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(entry.text, forType: .string)
+        pb.setString(text, forType: .string)
         copiedID = entry.id
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             if copiedID == entry.id { copiedID = nil }
         }
     }
 
-    private func paste(_ entry: TranscriptEntry) {
+    private func paste(_ entry: TranscriptEntry, text: String) {
         // Hide the history window so the previously focused app receives the paste.
         NSApp.keyWindow?.orderOut(nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            injector.inject(text: entry.text)
+            injector.inject(text: text)
         }
     }
 }
@@ -147,8 +151,8 @@ struct HistoryView: View {
 private struct HistoryRow: View {
     let entry: TranscriptEntry
     let isCopied: Bool
-    let onCopy: () -> Void
-    let onPaste: () -> Void
+    let onCopy: (String) -> Void
+    let onPaste: (String) -> Void
     let onDelete: () -> Void
     @State private var hovered = false
     @State private var showingOriginal = false
@@ -233,11 +237,17 @@ private struct HistoryRow: View {
 
     private var actions: some View {
         HStack(spacing: 4) {
-            iconButton(symbol: isCopied ? "checkmark" : "doc.on.doc", help: "Copy") {
-                onCopy()
+            iconButton(
+                symbol: isCopied ? "checkmark" : "doc.on.doc",
+                help: entry.wasPolished ? "Copy the \(showingOriginal ? "original" : "polished") version" : "Copy"
+            ) {
+                onCopy(shownText)
             }
-            iconButton(symbol: "arrow.up.right.square", help: "Paste into focused app") {
-                onPaste()
+            iconButton(
+                symbol: "arrow.up.right.square",
+                help: entry.wasPolished ? "Paste the \(showingOriginal ? "original" : "polished") version" : "Paste into focused app"
+            ) {
+                onPaste(shownText)
             }
             iconButton(symbol: "xmark", help: "Delete") {
                 onDelete()
