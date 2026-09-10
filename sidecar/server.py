@@ -328,7 +328,8 @@ def load_model(model_id: str) -> Any:
 
     if _current_model is not None:
         log(f"unloading current model {_current_model_id}")
-        _current_model = None  # let GC reclaim before next load
+        _current_model = None
+        release_unreferenced()
 
     log(f"loading {spec.backend} model {spec.repo}")
     t0 = time.perf_counter()
@@ -347,6 +348,74 @@ def load_model(model_id: str) -> Any:
     _current_model_id = model_id
     log(f"loaded {model_id} in {time.perf_counter() - t0:.2f}s")
     return _current_model
+
+
+# ---------------------------------------------------------------------------
+# Memory
+#
+# MLX keeps every freed Metal buffer in a cache, and by default that cache may
+# grow to 1.5x the GPU's recommended working set, about 54 GB on a 48 GB Mac.
+# Nothing here needs that: the speech model and the polish model together are
+# well under 10 GB and the per-request buffers are small. Left alone this
+# daemon reached 35 GB and pushed the rest of the machine into swap. So the
+# cache is capped, it is emptied after every piece of model work, and a guard
+# exits the process if active memory ever passes the budget, which makes
+# launchd start a clean daemon.
+# ---------------------------------------------------------------------------
+
+CACHE_LIMIT_BYTES = 1 << 30
+ACTIVE_MEMORY_BUDGET_BYTES = 14 << 30
+
+
+def configure_memory() -> None:
+    import mlx.core as mx
+
+    mx.set_cache_limit(CACHE_LIMIT_BYTES)
+    log(
+        f"mlx cache limit {CACHE_LIMIT_BYTES >> 20} MB, "
+        f"active memory budget {ACTIVE_MEMORY_BUDGET_BYTES >> 20} MB"
+    )
+
+
+def release_unreferenced() -> None:
+    """Gives dropped weights back to the OS before the next load.
+
+    Setting the module global to None only drops the Python reference. The
+    Metal buffers stay in MLX's cache until it is cleared, which is how a
+    7B to 3B polish swap used to leave both models' worth of memory behind.
+    """
+    import gc
+
+    import mlx.core as mx
+
+    gc.collect()
+    mx.clear_cache()
+
+
+def trim_memory(context: str) -> None:
+    """Empties the MLX buffer cache and logs what is still held.
+
+    Runs on the inference thread after every job. Anything still active at
+    that point is loaded weights or a leak, so passing the budget means the
+    daemon is no longer trustworthy and a restart is cheaper than a swap storm.
+    """
+    import mlx.core as mx
+
+    mx.clear_cache()
+    active = mx.get_active_memory()
+    cache = mx.get_cache_memory()
+    peak = mx.get_peak_memory()
+    log(
+        f"memory after {context}: active {active >> 20} MB, "
+        f"cache {cache >> 20} MB, peak {peak >> 20} MB"
+    )
+    if active > ACTIVE_MEMORY_BUDGET_BYTES:
+        log(
+            f"active memory {active >> 20} MB is over the "
+            f"{ACTIVE_MEMORY_BUDGET_BYTES >> 20} MB budget, exiting so launchd "
+            "starts a clean daemon"
+        )
+        os._exit(3)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +441,11 @@ def _inference_loop() -> None:
             reply.put((False, exc))
         finally:
             _disarm_watchdog()
+            try:
+                name = getattr(fn, "__name__", "job")
+                trim_memory("job" if name == "<lambda>" else name)
+            except Exception as exc:  # noqa: BLE001 - never let the trim take a request down
+                log(f"memory trim failed: {exc}")
 
 
 def run_on_inference_thread(fn, deadline: float):
@@ -493,6 +567,7 @@ def load_llm(model_id: str) -> Any:
     if _current_llm is not None:
         log(f"unloading current polish model {_current_llm_id}")
         _current_llm = None
+        release_unreferenced()
 
     log(f"loading polish model {spec.repo}")
     t0 = time.perf_counter()
@@ -1209,6 +1284,7 @@ def main() -> int:
     # bind). A hang during startup now still force-exits and lets launchd respawn.
     threading.Thread(target=_watchdog_loop, name="watchdog", daemon=True).start()
     threading.Thread(target=_inference_loop, name="inference", daemon=True).start()
+    run_on_inference_thread(configure_memory, DEADLINE_BY_CMD["ping"])
 
     # Bind + start listening BEFORE any model work. UnixStreamServer.__init__
     # binds and calls listen(), so the socket exists and accepts connections

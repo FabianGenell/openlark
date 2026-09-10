@@ -140,7 +140,10 @@ final class SidecarInstaller: ObservableObject {
     ///      tree (the extract only runs when python3 is missing), so the daemon
     ///      answers polish with "no polish support" until the runtime is
     ///      refreshed. Every other feature carries on working.
-    private let currentInstalledVersion = "6"
+    /// v7 = memory cap: the daemon limits MLX's buffer cache, trims it after
+    ///      every job and exits past a budget so launchd restarts it. Without
+    ///      it the cache grew to ~35 GB and pushed the whole machine into swap.
+    private let currentInstalledVersion = "7"
 
     private var isRunning = false
     private var installTask: Task<Void, Never>?
