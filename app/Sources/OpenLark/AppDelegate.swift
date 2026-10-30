@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let polishProfiles = PolishProfileStore.shared
     private let history = HistoryStore.shared
     private let injector = TextInjector()
+    private let updater = Updater()
     private var recordingStartedAt: Date?
     private var recordingFrontmostApp: String?
     private var localEscMonitor: Any?
@@ -268,6 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(openSettings),
             keyEquivalent: ""
         ))
+        menu.addItem(updater.menuItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit OpenLark",

@@ -39,6 +39,17 @@ echo "› bundling sidecar/server.py…"
 mkdir -p "$APP_BUNDLE/Contents/Resources/sidecar"
 cp "$ROOT_DIR/sidecar/server.py" "$APP_BUNDLE/Contents/Resources/sidecar/server.py"
 
+# Sparkle (auto-update) is linked as a framework, found at runtime through the
+# @executable_path/../Frameworks rpath set in Package.swift. Its XPC services
+# exist only for sandboxed apps; OpenLark isn't sandboxed, so they're dropped
+# rather than signed and notarized for nothing.
+echo "› embedding Sparkle.framework…"
+SPARKLE_SRC="$APP_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
+SPARKLE="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+ditto "$SPARKLE_SRC" "$SPARKLE"
+rm -rf "$SPARKLE/Versions/B/XPCServices" "$SPARKLE/XPCServices"
+
 echo "› codesigning…"
 # Identity priority:
 #   1. $SIGNING_IDENTITY env var (used by CI, "OpenLark Release")
@@ -57,16 +68,27 @@ if [ -z "${SIGNING_IDENTITY:-}" ]; then
 fi
 if security find-identity "${FIND_FLAGS[@]}" 2>/dev/null | grep -q "$IDENTITY_NAME"; then
     echo "  using identity: $IDENTITY_NAME"
-    codesign --force --deep --options runtime \
-        --entitlements "$ENTITLEMENTS" \
-        --identifier app.openlark.OpenLark \
-        --sign "$IDENTITY_NAME" "$APP_BUNDLE"
+    SIGN_ID="$IDENTITY_NAME"
 else
     echo "  (ad-hoc, for stable TCC permissions run scripts/setup-signing-identity.sh once)"
-    codesign --force --deep --options runtime \
-        --entitlements "$ENTITLEMENTS" \
-        --identifier app.openlark.OpenLark --sign - "$APP_BUNDLE"
+    SIGN_ID="-"
 fi
+# Notarization needs a secure timestamp on every piece of code; the notarized
+# release sets CODESIGN_TIMESTAMP=--timestamp. Local builds skip the round trip.
+TIMESTAMP_FLAG="${CODESIGN_TIMESTAMP:---timestamp=none}"
+
+# Inside out: Sparkle's helpers, then the framework, then the app. Not --deep,
+# which would stamp the app's entitlements onto Sparkle's helpers.
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_ID" \
+    "$SPARKLE/Versions/B/Autoupdate"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_ID" \
+    "$SPARKLE/Versions/B/Updater.app"
+codesign --force --options runtime "$TIMESTAMP_FLAG" --sign "$SIGN_ID" "$SPARKLE"
+codesign --force --options runtime "$TIMESTAMP_FLAG" \
+    --entitlements "$ENTITLEMENTS" \
+    --identifier app.openlark.OpenLark \
+    --sign "$SIGN_ID" "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 
 echo "✓ built: $APP_BUNDLE"
 echo ""

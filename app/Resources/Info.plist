@@ -34,5 +34,11 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenLark needs microphone access to record your voice for local speech-to-text.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/FabianGenell/openlark/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>5THrueNBeRmEFAfJLw6S7kiQ8pgFB19MIihKafYrJFk=</string>
 </dict>
 </plist>

@@ -15,6 +15,8 @@
 #   - "Developer ID Application: Heltra LLC (Q82GBB49WJ)" in the login keychain
 #   - App Store Connect API key at ~/.config/asc/AuthKey_WUXT5BGU6R.p8
 #   - gh authenticated for the repo
+#   - the Sparkle update-signing key at ~/.config/openlark/sparkle_ed25519_private_key
+#     (also in the login keychain under the account "openlark")
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
@@ -38,6 +40,9 @@ PLIST="$ROOT_DIR/app/Resources/Info.plist"
 ENTITLEMENTS="$ROOT_DIR/app/Resources/OpenLark.entitlements"
 APP="$ROOT_DIR/build/OpenLark.app"
 ZIP="$ROOT_DIR/build/OpenLark.app.zip"
+APPCAST="$ROOT_DIR/build/appcast.xml"
+SIGN_UPDATE="$ROOT_DIR/app/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+ED_KEY="$HOME/.config/openlark/sparkle_ed25519_private_key"
 
 # --- Preconditions -----------------------------------------------------------
 if [ -n "$(git status --porcelain)" ]; then
@@ -51,6 +56,7 @@ if ! security find-identity -p codesigning -v | grep -q "$DEVID"; then
     exit 1
 fi
 [ -f "$ASC_KEY" ] || { echo "✗ App Store Connect key missing at $ASC_KEY"; exit 1; }
+[ -f "$ED_KEY" ] || { echo "✗ Sparkle signing key missing at $ED_KEY"; exit 1; }
 
 # --- 1. Bump version ---------------------------------------------------------
 CUR_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST")
@@ -60,7 +66,7 @@ NEXT_BUILD=$((CUR_BUILD + 1))
 echo "› version $VERSION (build $NEXT_BUILD)"
 
 # --- 2. Build, signed with the Developer ID identity -------------------------
-SIGNING_IDENTITY="$DEVID" "$ROOT_DIR/scripts/build.sh"
+SIGNING_IDENTITY="$DEVID" CODESIGN_TIMESTAMP=--timestamp "$ROOT_DIR/scripts/build.sh"
 
 # --- 3. Re-sign with a secure timestamp (notarization requires one) ----------
 codesign --force --options runtime --timestamp \
@@ -88,14 +94,37 @@ echo "› Gatekeeper assessment:"
 spctl -a -vvv --type exec "$APP"
 xcrun stapler validate "$APP"
 
-# --- 7. Commit, tag, push, publish -------------------------------------------
+# --- 7. Appcast for Sparkle ---------------------------------------------------
+# Installed copies read releases/latest/download/appcast.xml, so each release
+# carries a feed naming itself. The EdDSA signature is what lets the app trust
+# the zip it downloads.
+ED_ATTRS=$("$SIGN_UPDATE" --ed-key-file "$ED_KEY" "$ZIP")
+cat > "$APPCAST" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>OpenLark</title>
+    <item>
+      <title>$VERSION</title>
+      <pubDate>$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+      <sparkle:version>$NEXT_BUILD</sparkle:version>
+      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <sparkle:releaseNotesLink>https://github.com/FabianGenell/openlark/releases/tag/v$VERSION</sparkle:releaseNotesLink>
+      <enclosure url="https://github.com/FabianGenell/openlark/releases/download/v$VERSION/OpenLark.app.zip" type="application/octet-stream" $ED_ATTRS />
+    </item>
+  </channel>
+</rss>
+EOF
+
+# --- 8. Commit, tag, push, publish -------------------------------------------
 SHA=$(cut -d' ' -f1 < "$ZIP.sha256")
 git add "$PLIST"
 git commit -m "release: v$VERSION"
 git tag "v$VERSION"
 git push origin main "v$VERSION"
 
-gh release create "v$VERSION" "$ZIP" "$ZIP.sha256" \
+gh release create "v$VERSION" "$ZIP" "$ZIP.sha256" "$APPCAST" \
     --title "v$VERSION" \
     --notes "$(cat <<EOF
 ## Install
