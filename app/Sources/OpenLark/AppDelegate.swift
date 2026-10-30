@@ -86,6 +86,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayController.onSkipPolish = { [weak self] in
             self?.skipPolish()
         }
+        overlayController.onStop = { [weak self] in
+            self?.stopAndTranscribe()
+        }
+        overlayController.onCancel = { [weak self] in
+            self?.cancel()
+        }
         overlayController.onSelectProfile = { [weak self] index in
             guard let self else { return }
             let profiles = self.polishProfiles.profiles

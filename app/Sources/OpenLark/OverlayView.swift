@@ -50,23 +50,27 @@ struct OverlayView: View {
     @ViewBuilder
     private var trailingControls: some View {
         if model.phase == .listening {
-            Text("Stop")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.7))
-            KeyCap(symbol: "command")
-            KeyCap(symbol: "arrow.up")
+            ShortcutButton(
+                title: "Stop",
+                help: "Stop recording and transcribe",
+                action: { model.onStop?() }
+            ) {
+                KeyCap(symbol: "command")
+                KeyCap(symbol: "arrow.up")
+            }
         }
 
         if model.phase == .polishing {
             SkipPolishButton { model.onSkipPolish?() }
         }
 
-        Text("Cancel")
-            .font(.system(size: 13))
-            .foregroundStyle(.white.opacity(0.7))
-            .padding(.leading, model.phase == .listening ? 6 : 0)
-
-        KeyCap(text: "esc")
+        ShortcutButton(
+            title: "Cancel",
+            help: "Esc. Discard this dictation.",
+            action: { model.onCancel?() }
+        ) {
+            KeyCap(text: "esc")
+        }
     }
 
     var body: some View {
@@ -210,6 +214,42 @@ private struct SkipPolishButton: View {
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help("Tab. Paste the transcript as dictated, without waiting for polish.")
         .accessibilityLabel("Use the original transcript")
+    }
+}
+
+/// A label and its keycaps as one clickable control, for when the mouse is
+/// already on the pill. The plate only shows on hover, so at rest the row
+/// reads as the same shortcut hint it always was.
+private struct ShortcutButton<Keys: View>: View {
+    let title: String
+    let help: String
+    let action: () -> Void
+    @ViewBuilder let keys: () -> Keys
+
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(hovered ? 1 : 0.7))
+                keys()
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 3)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(.white.opacity(hovered ? 0.10 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .help(help)
+        .accessibilityLabel(title)
     }
 }
 

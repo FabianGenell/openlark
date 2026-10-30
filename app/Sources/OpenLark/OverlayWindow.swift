@@ -41,6 +41,16 @@ final class OverlayWindowController {
         set { model.onSkipPolish = newValue }
     }
 
+    var onStop: (() -> Void)? {
+        get { model.onStop }
+        set { model.onStop = newValue }
+    }
+
+    var onCancel: (() -> Void)? {
+        get { model.onCancel }
+        set { model.onCancel = newValue }
+    }
+
     func setProfiles(_ names: [String], active: String) {
         model.profileNames = names
         model.activeProfile = active
@@ -240,6 +250,8 @@ final class OverlayModel: ObservableObject {
     var onTogglePolish: (() -> Void)?
     var onSelectProfile: ((Int) -> Void)?
     var onSkipPolish: (() -> Void)?
+    var onStop: (() -> Void)?
+    var onCancel: (() -> Void)?
     /// The panel the pill is drawn in, so a menu popped from it can duck under
     /// the panel's window level for as long as it's up.
     var hostWindow: (() -> NSWindow?)?
