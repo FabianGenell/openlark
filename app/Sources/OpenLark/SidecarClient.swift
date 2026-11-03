@@ -303,20 +303,61 @@ actor SidecarClient {
         onFrame: (@Sendable (_ frame: [String: Any]) -> Void)? = nil
     ) async throws -> [[String: Any]] {
         let box = UncheckedBox(header: header, audio: audio, onFrame: onFrame)
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let frames = try self.sendRequest(
-                        header: box.header,
-                        audio: box.audio,
-                        expectMultiFrame: expectMultiFrame,
-                        recvTimeout: recvTimeout,
-                        onFrame: box.onFrame
-                    )
-                    continuation.resume(returning: frames)
-                } catch {
-                    continuation.resume(throwing: error)
+        let canceller = SocketCanceller()
+        // The blocking recv below never looks at Task cancellation, so a
+        // cancelled caller (onboarding Cancel during the model download) used
+        // to wait out the whole request. Shutting the socket down wakes the
+        // recv at once. The daemon treats a vanished client as "stopped
+        // watching" and keeps any download going, so Retry picks it back up.
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let frames = try self.sendRequest(
+                            header: box.header,
+                            audio: box.audio,
+                            expectMultiFrame: expectMultiFrame,
+                            recvTimeout: recvTimeout,
+                            onFrame: box.onFrame,
+                            canceller: canceller
+                        )
+                        continuation.resume(returning: frames)
+                    } catch {
+                        continuation.resume(throwing: canceller.isCancelled ? CancellationError() : error)
+                    }
                 }
+            }
+        } onCancel: {
+            canceller.cancel()
+        }
+    }
+
+    /// Lets a cancelled task interrupt a request blocked in recv on another
+    /// thread. Cancel can arrive before the socket exists, so the flag is
+    /// checked again when the fd is registered.
+    private final class SocketCanceller: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fd: Int32 = -1
+        private var cancelled = false
+
+        var isCancelled: Bool { lock.withLock { cancelled } }
+
+        /// False if the request was cancelled before it got a socket.
+        func register(_ fd: Int32) -> Bool {
+            lock.withLock {
+                self.fd = fd
+                return !cancelled
+            }
+        }
+
+        func unregister() {
+            lock.withLock { fd = -1 }
+        }
+
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+                if fd >= 0 { Darwin.shutdown(fd, SHUT_RDWR) }
             }
         }
     }
@@ -335,11 +376,18 @@ actor SidecarClient {
         audio: Data?,
         expectMultiFrame: Bool,
         recvTimeout: TimeInterval = 0,
-        onFrame: ((_ frame: [String: Any]) -> Void)? = nil
+        onFrame: ((_ frame: [String: Any]) -> Void)? = nil,
+        canceller: SocketCanceller? = nil
     ) throws -> [[String: Any]] {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         if fd < 0 { throw SidecarError.socketCreate }
-        defer { close(fd) }
+        // Unregister before close so a late cancel can't shut down an fd
+        // number the system has already handed to someone else.
+        defer {
+            canceller?.unregister()
+            close(fd)
+        }
+        if let canceller, !canceller.register(fd) { throw CancellationError() }
 
         if recvTimeout > 0 {
             var tv = timeval(
@@ -351,16 +399,8 @@ actor SidecarClient {
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvSize)
         }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(socketPath.utf8)
-        withUnsafeMutablePointer(to: &addr.sun_path) { pathPtr in
-            pathPtr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dst in
-                for (i, byte) in pathBytes.enumerated() {
-                    dst[i] = CChar(byte)
-                }
-                dst[pathBytes.count] = 0
-            }
+        guard var addr = unixSocketAddress(socketPath) else {
+            throw SidecarError.malformed("socket path too long: \(socketPath)")
         }
         let size = socklen_t(MemoryLayout<sockaddr_un>.size)
         let connectResult = withUnsafePointer(to: &addr) {
@@ -401,6 +441,9 @@ actor SidecarClient {
             onFrame?(obj)
             if !expectMultiFrame { break }
         }
+        // A shutdown from cancel() reads as a clean EOF; don't let that pass
+        // for a finished stream.
+        if canceller?.isCancelled == true { throw CancellationError() }
         return frames
     }
 
@@ -423,6 +466,7 @@ actor SidecarClient {
                     data.count - sent,
                     0
                 )
+                if result < 0 && errno == EINTR { continue }
                 if result <= 0 { throw SidecarError.sendFailed }
                 sent += result
             }
@@ -440,6 +484,7 @@ actor SidecarClient {
                     count - got,
                     0
                 )
+                if result < 0 && errno == EINTR { continue }
                 if result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                     throw SidecarError.timedOut
                 }
@@ -464,6 +509,7 @@ actor SidecarClient {
                     count - got,
                     0
                 )
+                if result < 0 && errno == EINTR { continue }
                 if result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
                     throw SidecarError.timedOut
                 }
@@ -477,4 +523,20 @@ actor SidecarClient {
         }
         return clean ? nil : data
     }
+}
+
+/// sockaddr_un for `path`, or nil if it doesn't fit. sun_path is 104 bytes on
+/// Darwin and needs room for the trailing NUL, so a longer path would write
+/// past the end of the struct.
+func unixSocketAddress(_ path: String) -> sockaddr_un? {
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    let pathBytes = Array(path.utf8)
+    let capacity = MemoryLayout.size(ofValue: addr.sun_path)
+    guard pathBytes.count < capacity else { return nil }
+    withUnsafeMutableBytes(of: &addr.sun_path) { dst in
+        dst.copyBytes(from: pathBytes)
+        dst[pathBytes.count] = 0
+    }
+    return addr
 }

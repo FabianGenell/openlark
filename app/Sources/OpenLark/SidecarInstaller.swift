@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -106,11 +107,9 @@ final class SidecarInstaller: ObservableObject {
             .appendingPathComponent("app.openlark.sidecar.plist")
     }
 
-    /// Marker file recording the wire-protocol version of the currently-
-    /// installed sidecar. Bump `currentInstalledVersion` whenever server.py
-    /// changes in a way that breaks the running daemon (new env vars,
-    /// new wire protocol, new pip deps). On launch we compare; mismatch
-    /// triggers an in-place reinstall (daemon unload + new plist + load).
+    /// Marker file recording which daemon is installed. On launch it's
+    /// compared with `currentInstalledVersion`; a mismatch triggers an
+    /// in-place reinstall (daemon unload + new plist + load).
     ///
     /// It records the daemon only. Whether a speech model has been downloaded
     /// is a separate question with its own answer (the model is either in the
@@ -119,31 +118,34 @@ final class SidecarInstaller: ObservableObject {
     var installedVersionURL: URL {
         supportRoot.appendingPathComponent(".installed-version", isDirectory: false)
     }
-    /// v3 = multi-model JSON-header protocol + mlx-whisper dep.
-    ///      Deliberately no HF_HOME: the daemon uses the default
-    ///      ~/.cache/huggingface, which is shared with every other MLX tool on
-    ///      the machine, so a model downloaded once is not downloaded again per
-    ///      app. Pointing HF_HOME at our own Application Support directory was
-    ///      tried locally during development and orphaned a full duplicate of
-    ///      the active model. It was never committed or shipped. Do not add it.
-    /// v4 = hang-hardened daemon: socket binds before model load, startup
-    ///      watchdog, fail-fast on missing model, prefetch heartbeats. Bumped so
-    ///      existing installs get the new server.py + restart on next launch.
-    /// v5 = model registry changes: Parakeet v3 marked multilingual, corrected
-    ///      Parakeet download sizes, plus parakeet-tdt-ctc-110m and
-    ///      whisper-large-v3-turbo-q4. The running daemon resolves model ids
-    ///      from its own copy of server.py, so without this bump the two new
-    ///      ids come back as "unknown model id".
-    /// v6 = polish pass: new `polish` command, a second model registry the
-    ///      running daemon has to know about, and the mlx-lm dependency. Ships
-    ///      with runtime-v3; an install still on the v2 bundle keeps its Python
-    ///      tree (the extract only runs when python3 is missing), so the daemon
-    ///      answers polish with "no polish support" until the runtime is
-    ///      refreshed. Every other feature carries on working.
-    /// v7 = memory cap: the daemon limits MLX's buffer cache, trims it after
-    ///      every job and exits past a budget so launchd restarts it. Without
-    ///      it the cache grew to ~35 GB and pushed the whole machine into swap.
-    private let currentInstalledVersion = "7"
+
+    /// SHA-256 over everything that defines the running daemon: the bundled
+    /// server.py, the launch agent plist and the runtime bundle URL.
+    ///
+    /// This used to be a hand-bumped counter, and forgetting the bump failed
+    /// silently: the daemon runs its own installed copy of server.py, so a
+    /// registry edit without a bump left Settings offering a model the daemon
+    /// answered with "unknown model id". Hashing means any change to the
+    /// daemon forces the reinstall-and-restart path on its own.
+    ///
+    /// Keep HF_HOME out of the plist (see writeLaunchAgent): the daemon shares
+    /// ~/.cache/huggingface with every other MLX tool on the machine.
+    private lazy var currentInstalledVersion: String = {
+        var hasher = SHA256()
+        if let bundled = bundledServerScriptURL,
+           let data = try? Data(contentsOf: bundled) {
+            hasher.update(data: data)
+        }
+        if let plist = try? launchAgentPlistData() {
+            hasher.update(data: plist)
+        }
+        hasher.update(data: Data(runtimeBundleURL.absoluteString.utf8))
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }()
+
+    private var bundledServerScriptURL: URL? {
+        Bundle.main.url(forResource: "server", withExtension: "py", subdirectory: "sidecar")
+    }
 
     private var isRunning = false
     private var installTask: Task<Void, Never>?
@@ -160,15 +162,7 @@ final class SidecarInstaller: ObservableObject {
         guard fd >= 0 else { return false }
         defer { Darwin.close(fd) }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array("/tmp/openlark.sock".utf8)
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: pathBytes.count) { dst in
-                for (i, b) in pathBytes.enumerated() { dst[i] = CChar(b) }
-                dst[pathBytes.count] = 0
-            }
-        }
+        guard var addr = unixSocketAddress("/tmp/openlark.sock") else { return false }
         let result = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
@@ -280,7 +274,7 @@ final class SidecarInstaller: ObservableObject {
 
     private func copyServerScript() throws {
         try FileManager.default.createDirectory(at: sidecarRoot, withIntermediateDirectories: true)
-        guard let bundled = Bundle.main.url(forResource: "server", withExtension: "py", subdirectory: "sidecar") else {
+        guard let bundled = bundledServerScriptURL else {
             throw NSError(
                 domain: "OpenLark.installer", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "bundled server.py missing, corrupt .app bundle?"]
@@ -314,6 +308,15 @@ final class SidecarInstaller: ObservableObject {
     }
 
     private func writeLaunchAgent() throws {
+        let data = try launchAgentPlistData()
+        try FileManager.default.createDirectory(
+            at: launchAgentURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: launchAgentURL)
+    }
+
+    private func launchAgentPlistData() throws -> Data {
         let plist: [String: Any] = [
             "Label": "app.openlark.sidecar",
             "ProgramArguments": [runtimePython.path, serverScript.path],
@@ -336,14 +339,9 @@ final class SidecarInstaller: ObservableObject {
             "StandardErrorPath": logsRoot.appendingPathComponent("sidecar.log").path,
             "ProcessType": "Interactive",
         ]
-        let data = try PropertyListSerialization.data(
+        return try PropertyListSerialization.data(
             fromPropertyList: plist, format: .xml, options: 0
         )
-        try FileManager.default.createDirectory(
-            at: launchAgentURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: launchAgentURL)
     }
 
     private func loadLaunchAgent() async throws {
