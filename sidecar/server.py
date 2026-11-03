@@ -272,27 +272,76 @@ def log(msg: str) -> None:
     sys.stderr.flush()
 
 
-def hf_cache_has(repo: str) -> bool:
-    """Best-effort check: is this repo already in the local HF cache?"""
-    base = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))) / "hub"
-    folder_name = "models--" + repo.replace("/", "--")
-    snapshots = base / folder_name / "snapshots"
-    if not snapshots.is_dir():
+def hub_cache_dir() -> Path:
+    """The hub cache huggingface_hub itself downloads into.
+
+    Asking the library instead of re-deriving it from HF_HOME keeps the cache
+    check and snapshot_download pointed at the same folder whatever mix of
+    HF_HOME / HF_HUB_CACHE is set. Under launchd neither is (see
+    SidecarInstaller.writeLaunchAgent), so this is ~/.cache/huggingface/hub,
+    shared with the user's other MLX tools.
+    """
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        return Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001 - fall back to the documented default
+        return Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))) / "hub"
+
+
+def _loadable(spec, snap: Path) -> bool:
+    """Does this snapshot hold the files the loader for `spec` opens?"""
+    if not (snap / "config.json").is_file():
         return False
+    backend = getattr(spec, "backend", None)
+    if backend == "parakeet":
+        return (snap / "model.safetensors").is_file()
+    if backend == "whisper":
+        return (snap / "weights.safetensors").is_file() or (snap / "weights.npz").is_file()
+    # Polish LLMs: mlx_lm loads every *.safetensors shard next to config.json.
+    return any(snap.glob("*.safetensors"))
+
+
+def local_snapshot(spec) -> Optional[Path]:
+    """The complete, loadable local snapshot of `spec`'s repo at main, or None.
+
+    Answers for the revision `snapshot_download` resolved (refs/main), not for
+    whichever snapshot happens to exist. Another MLX tool that pinned an older
+    revision of the same repo leaves a snapshot here too; counting that one
+    used to let a transcribe through to `from_pretrained`, which then
+    downloaded main inside the request.
+    """
+    folder = hub_cache_dir() / ("models--" + spec.repo.replace("/", "--"))
+    ref = folder / "refs" / "main"
+    try:
+        sha = ref.read_text().strip()
+    except OSError:
+        return None
+    snap = folder / "snapshots" / sha
+    if not snap.is_dir():
+        return None
     # A half-finished download leaves .incomplete blobs behind. Reporting such a
     # repo as downloaded would let a transcribe or polish request through to a
     # model whose weights aren't all there yet, and would hide the progress bar
     # behind an "On disk" badge while bytes were still landing.
-    blobs = base / folder_name / "blobs"
+    blobs = folder / "blobs"
     if blobs.is_dir() and any(blobs.glob("*.incomplete")):
-        return False
+        return None
+    return snap if _loadable(spec, snap) else None
 
-    # A repo is "downloaded" once a snapshot exists with at least one weight file.
-    for snap in snapshots.iterdir():
-        for entry in snap.rglob("*"):
-            if entry.is_file() and entry.suffix in (".safetensors", ".bin", ".npz", ".gguf"):
-                return True
-    return False
+
+def hf_cache_has(spec) -> bool:
+    """Is this model downloaded and loadable without touching the network?"""
+    return local_snapshot(spec) is not None
+
+
+def model_source(spec) -> str:
+    """What to hand a loader: the local snapshot when there is one.
+
+    Every loader here takes a directory as well as a repo id. Passing the
+    directory means a load can never turn into a download.
+    """
+    snap = local_snapshot(spec)
+    return str(snap) if snap is not None else spec.repo
 
 
 def hf_cache_bytes(repo: str) -> int:
@@ -301,8 +350,7 @@ def hf_cache_bytes(repo: str) -> int:
     Used for download progress. huggingface_hub reports none of its own, so the
     honest measure is how much has actually landed.
     """
-    base = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))) / "hub"
-    folder = base / ("models--" + repo.replace("/", "--"))
+    folder = hub_cache_dir() / ("models--" + repo.replace("/", "--"))
     if not folder.is_dir():
         return 0
     total = 0
@@ -335,13 +383,13 @@ def load_model(model_id: str) -> Any:
     t0 = time.perf_counter()
     if spec.backend == "parakeet":
         from parakeet_mlx import from_pretrained
-        _current_model = ("parakeet", from_pretrained(spec.repo))
+        _current_model = ("parakeet", from_pretrained(model_source(spec)))
     elif spec.backend == "whisper":
         # mlx-whisper transcribes via a top-level call that loads on demand.
         # The "model" we cache is just the repo string. mlx_whisper caches
         # the loaded weights internally per process.
         import mlx_whisper  # noqa: F401  (verify dep is present)
-        _current_model = ("whisper", spec.repo)
+        _current_model = ("whisper", model_source(spec))
     else:
         raise ValueError(f"unsupported backend: {spec.backend}")
 
@@ -572,7 +620,7 @@ def load_llm(model_id: str) -> Any:
     log(f"loading polish model {spec.repo}")
     t0 = time.perf_counter()
     from mlx_lm import load as load_lm
-    _current_llm = load_lm(spec.repo)
+    _current_llm = load_lm(model_source(spec))
     _current_llm_id = model_id
     log(f"loaded polish model {model_id} in {time.perf_counter() - t0:.2f}s")
     return _current_llm
@@ -916,9 +964,7 @@ def _delete_model_locked(model_id: str, spec) -> None:
         _current_llm_id = None
 
     import shutil
-    base = Path(os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))) / "hub"
-    folder_name = "models--" + spec.repo.replace("/", "--")
-    target = base / folder_name
+    target = hub_cache_dir() / ("models--" + spec.repo.replace("/", "--"))
     if target.is_dir():
         log(f"deleting {target}")
         shutil.rmtree(target, ignore_errors=True)
@@ -1021,7 +1067,7 @@ def prefetch(model_id: str, send_event) -> None:
     if spec is None:
         raise ValueError(f"unknown model id: {model_id}")
 
-    if hf_cache_has(spec.repo):
+    if hf_cache_has(spec):
         send_event({"event": "done"})
         return
 
@@ -1138,7 +1184,7 @@ class Handler(socketserver.BaseRequestHandler):
                         "backend": spec.backend,
                         "sizeMB": spec.size_mb,
                         "multilingual": spec.multilingual,
-                        "downloaded": hf_cache_has(spec.repo),
+                        "downloaded": hf_cache_has(spec),
                         "onDiskMB": hf_cache_bytes(spec.repo) // (1024 * 1024),
                         "downloading": download_in_progress(spec.id),
                     }
@@ -1150,7 +1196,7 @@ class Handler(socketserver.BaseRequestHandler):
                         "backend": "mlx-lm",
                         "sizeMB": spec.size_mb,
                         "multilingual": True,
-                        "downloaded": hf_cache_has(spec.repo),
+                        "downloaded": hf_cache_has(spec),
                         "onDiskMB": hf_cache_bytes(spec.repo) // (1024 * 1024),
                         "downloading": download_in_progress(spec.id),
                     }
@@ -1182,7 +1228,7 @@ class Handler(socketserver.BaseRequestHandler):
                     send_frame(sock, {"event": "error", "message": f"unknown polish model id: {model_id}", "code": "unknown_model"})
                     return
                 # Same rule as transcribe: never download inside a request.
-                if _current_llm_id != model_id and not hf_cache_has(spec.repo):
+                if _current_llm_id != model_id and not hf_cache_has(spec):
                     send_frame(sock, {"event": "error", "message": f"model not downloaded: {model_id}", "code": "model_missing"})
                     return
                 try:
@@ -1235,7 +1281,7 @@ class Handler(socketserver.BaseRequestHandler):
                 if spec is None:
                     send_frame(sock, {"event": "error", "message": f"unknown model id: {model_id}", "code": "unknown_model"})
                     return
-                if _current_model_id != model_id and not hf_cache_has(spec.repo):
+                if _current_model_id != model_id and not hf_cache_has(spec):
                     send_frame(sock, {"event": "error", "message": f"model not downloaded: {model_id}", "code": "model_missing"})
                     return
                 audio, sr = read_wav_to_float32(wav_bytes)
@@ -1303,7 +1349,7 @@ def main() -> int:
     # with a progress UI; the first transcribe then loads the cached weights.
     try:
         spec = MODELS.get(DEFAULT_MODEL_ID)
-        if spec is not None and hf_cache_has(spec.repo):
+        if spec is not None and hf_cache_has(spec):
             # Through the inference thread, so the model is loaded on the same
             # thread that will later run it.
             run_on_inference_thread(
