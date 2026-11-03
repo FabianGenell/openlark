@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
+import os
 
 /// Records mic input via AVCaptureSession.
 ///
@@ -22,16 +23,20 @@ final class AudioRecorder: NSObject {
     private let samplesQueue = DispatchQueue(label: "openlark.recorder.samples")
     private let captureQueue = DispatchQueue(label: "openlark.recorder.capture", qos: .userInteractive)
 
-    private var loggedFormat = false
-    private var sourceSampleRate: Double = 0
-    private var levelLinear: Float = 0
-    var currentLevel: Float { levelLinear }
+    /// Written on captureQueue, read on main. Kept behind one lock so the
+    /// level meter and the stop-time resample never see a torn value.
+    private struct CaptureState {
+        var loggedFormat = false
+        var sourceSampleRate: Double = 0
+        var levelLinear: Float = 0
+    }
+    private let state = OSAllocatedUnfairLock(initialState: CaptureState())
+    var currentLevel: Float { state.withLock { $0.levelLinear } }
 
     func start() throws {
         teardown()
         samples.removeAll(keepingCapacity: true)
-        levelLinear = 0
-        loggedFormat = false
+        state.withLock { $0 = CaptureState() }
 
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         AppLogger.log("mic authorizationStatus: \(micStatus.rawValue) (0=notDetermined 1=restricted 2=denied 3=authorized)")
@@ -115,6 +120,7 @@ final class AudioRecorder: NSObject {
             AppLogger.log("⚠ near-silent capture (peak \(String(format: "%.1f", peakDb)) dBFS), try the built-in mic in System Settings → Sound → Input, or reconnect your Bluetooth headset")
         }
 
+        let sourceSampleRate = state.withLock { $0.sourceSampleRate }
         let outSamples: [Int16]
         if abs(sourceSampleRate - 16_000) < 1 || sourceSampleRate == 0 {
             outSamples = buffer
@@ -133,7 +139,7 @@ final class AudioRecorder: NSObject {
     func cancel() {
         teardown()
         samplesQueue.sync { samples.removeAll(keepingCapacity: false) }
-        levelLinear = 0
+        state.withLock { $0.levelLinear = 0 }
     }
 
     private func teardown() {
@@ -142,7 +148,7 @@ final class AudioRecorder: NSObject {
         for input in session.inputs { session.removeInput(input) }
         for output in session.outputs { session.removeOutput(output) }
         self.session = nil
-        self.sourceSampleRate = 0
+        state.withLock { $0.sourceSampleRate = 0 }
     }
 
     /// Stop the session off the main thread with a bounded wait. `stopRunning()`
@@ -199,104 +205,22 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
         let channels = Int(asbd.mChannelsPerFrame)
         let sampleRate = asbd.mSampleRate
 
-        if !loggedFormat {
-            loggedFormat = true
-            sourceSampleRate = sampleRate
+        let (firstBuffer, previousRate) = state.withLock { s -> (Bool, Double) in
+            let first = !s.loggedFormat
+            let prev = s.sourceSampleRate
+            s.loggedFormat = true
+            s.sourceSampleRate = sampleRate
+            return (first, prev)
+        }
+        if firstBuffer {
             AppLogger.log("incoming asbd: sr=\(sampleRate) ch=\(channels) bits=\(bits) float=\(isFloat) signedInt=\(isSignedInt) interleaved=\(interleaved) bytesPerFrame=\(asbd.mBytesPerFrame)")
-        } else if sampleRate != sourceSampleRate {
-            // Format renegotiated mid-stream, record the new rate; resample at stop time.
-            AppLogger.log("⚠ format changed mid-stream: sr \(sourceSampleRate) → \(sampleRate)")
-            sourceSampleRate = sampleRate
+        } else if sampleRate != previousRate {
+            // Format renegotiated mid-stream; the new rate is already stored
+            // and the resample at stop time uses it.
+            AppLogger.log("⚠ format changed mid-stream: sr \(previousRate) → \(sampleRate)")
         }
 
-        // Extract the raw data block.
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-        let totalBytes = CMBlockBufferGetDataLength(blockBuffer)
-        guard totalBytes > 0 else { return }
-        var dataPointer: UnsafeMutablePointer<CChar>?
-        var lengthAtOffset = 0
-        let status = CMBlockBufferGetDataPointer(
-            blockBuffer,
-            atOffset: 0,
-            lengthAtOffsetOut: &lengthAtOffset,
-            totalLengthOut: nil,
-            dataPointerOut: &dataPointer
-        )
-        guard status == kCMBlockBufferNoErr, let dataPointer else { return }
-
-        // Everything below reads `dataPointer` as one flat interleaved run, so
-        // refuse anything that isn't. Two ways that assumption breaks:
-        //
-        // 1. The pointer is only valid for `lengthAtOffset` bytes. Non-
-        //    interleaved audio arrives as one memory block per channel, so the
-        //    first block is shorter than the buffer and every read past it is
-        //    out of bounds.
-        // 2. For a non-interleaved ASBD, mBytesPerFrame counts one channel's
-        //    bytes, so frameCount below comes out `channels` times too large
-        //    and the indexing runs off the end again.
-        //
-        // Neither shows up on the 1-channel built-in mic, which is why this
-        // went unnoticed. Handling planar layouts properly needs
-        // CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer and a
-        // multi-channel device to verify against; until then, dropping the
-        // buffer with a log line beats reading past the end of it.
-        guard asbd.mBytesPerFrame > 0 else {
-            AppLogger.log("⚠ dropping sample buffer: mBytesPerFrame is 0")
-            return
-        }
-        guard interleaved || channels == 1 else {
-            AppLogger.log("⚠ dropping sample buffer: non-interleaved \(channels)-channel input is not supported yet")
-            return
-        }
-        guard lengthAtOffset >= totalBytes else {
-            AppLogger.log("⚠ dropping sample buffer: fragmented block (\(lengthAtOffset) of \(totalBytes) bytes contiguous)")
-            return
-        }
-
-        // Walk the block as the source format and emit Int16 mono samples.
-        let frameCount = totalBytes / Int(asbd.mBytesPerFrame)
-        var newSamples = [Int16]()
-        newSamples.reserveCapacity(frameCount)
-
-        if isFloat && bits == 32 {
-            let floats = UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Float32.self)
-            for frame in 0..<frameCount {
-                // For multi-channel input, take channel 0 (or average, let's downmix).
-                var acc: Float = 0
-                for c in 0..<channels {
-                    acc += floats[frame * channels + c]
-                }
-                let v = acc / Float(channels)
-                let clipped = max(-1.0, min(1.0, v))
-                newSamples.append(Int16(clipped * 32767.0))
-            }
-        } else if isSignedInt && bits == 16 {
-            let int16s = UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Int16.self)
-            for frame in 0..<frameCount {
-                if channels == 1 {
-                    newSamples.append(int16s[frame])
-                } else {
-                    var acc: Int32 = 0
-                    for c in 0..<channels {
-                        acc += Int32(int16s[frame * channels + c])
-                    }
-                    newSamples.append(Int16(acc / Int32(channels)))
-                }
-            }
-        } else if isSignedInt && bits == 32 {
-            let int32s = UnsafeRawPointer(dataPointer).assumingMemoryBound(to: Int32.self)
-            for frame in 0..<frameCount {
-                var acc: Int64 = 0
-                for c in 0..<channels {
-                    acc += Int64(int32s[frame * channels + c]) >> 16
-                }
-                newSamples.append(Int16(acc / Int64(channels)))
-            }
-        } else {
-            // First time we hit an unknown format, log and bail; samples stay 0.
-            AppLogger.log("unsupported sample format: float=\(isFloat) signedInt=\(isSignedInt) bits=\(bits)")
-            return
-        }
+        guard let newSamples = Self.monoInt16(from: sampleBuffer, asbd: asbd) else { return }
 
         guard !newSamples.isEmpty else { return }
 
@@ -307,10 +231,118 @@ extension AudioRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
             rmsAcc += f * f
         }
         let rms = sqrt(rmsAcc / Float(newSamples.count))
-        levelLinear = max(rms, levelLinear * 0.85)
+        state.withLock { $0.levelLinear = max(rms, $0.levelLinear * 0.85) }
 
         samplesQueue.sync {
             samples.append(contentsOf: newSamples)
         }
+    }
+}
+
+extension AudioRecorder {
+    /// Downmix one capture buffer to mono Int16 at the source rate.
+    ///
+    /// Goes through the AudioBufferList rather than the raw block pointer, so
+    /// both layouts come out right: interleaved audio is one buffer holding
+    /// every channel, non-interleaved (planar) audio is one buffer per channel.
+    /// Each buffer's own mDataByteSize bounds the reads, so nothing walks past
+    /// the memory CoreMedia handed over.
+    static func monoInt16(from sampleBuffer: CMSampleBuffer, asbd: AudioStreamBasicDescription) -> [Int16]? {
+        var sizeNeeded = 0
+        var status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &sizeNeeded,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: nil
+        )
+        guard status == noErr, sizeNeeded > 0 else {
+            AppLogger.log("⚠ dropping sample buffer: buffer list size query failed (\(status))")
+            return nil
+        }
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: sizeNeeded,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { raw.deallocate() }
+        let listPtr = raw.bindMemory(to: AudioBufferList.self, capacity: 1)
+        var retainedBlock: CMBlockBuffer?
+        status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: listPtr,
+            bufferListSize: sizeNeeded,
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: &retainedBlock
+        )
+        guard status == noErr else {
+            AppLogger.log("⚠ dropping sample buffer: buffer list fetch failed (\(status))")
+            return nil
+        }
+        // retainedBlock keeps the memory the buffer list points at alive until
+        // this function returns.
+        return withExtendedLifetime(retainedBlock) {
+            downmix(UnsafeMutableAudioBufferListPointer(listPtr), asbd: asbd)
+        }
+    }
+
+    /// Pure conversion from an AudioBufferList in `asbd`'s sample format to
+    /// mono Int16. Separate from the CoreMedia plumbing so it can be exercised
+    /// with synthetic planar and interleaved buffers.
+    static func downmix(_ buffers: UnsafeMutableAudioBufferListPointer, asbd: AudioStreamBasicDescription) -> [Int16]? {
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let isSignedInt = (asbd.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0
+        let bits = Int(asbd.mBitsPerChannel)
+        let bytesPerSample: Int
+        switch (isFloat, isSignedInt, bits) {
+        case (true, _, 32), (false, true, 32): bytesPerSample = 4
+        case (false, true, 16): bytesPerSample = 2
+        default:
+            AppLogger.log("unsupported sample format: float=\(isFloat) signedInt=\(isSignedInt) bits=\(bits)")
+            return nil
+        }
+
+        // Each buffer carries mNumberChannels interleaved channels (1 for a
+        // planar plane). Frames = the shortest buffer, so a short plane can
+        // never be over-read.
+        var planes: [(data: UnsafeRawPointer, channels: Int)] = []
+        var frameCount = Int.max
+        for buf in buffers {
+            let ch = Int(buf.mNumberChannels)
+            guard ch > 0, let data = buf.mData else { continue }
+            planes.append((UnsafeRawPointer(data), ch))
+            frameCount = min(frameCount, Int(buf.mDataByteSize) / (bytesPerSample * ch))
+        }
+        let totalChannels = planes.reduce(0) { $0 + $1.channels }
+        guard totalChannels > 0, frameCount != Int.max, frameCount > 0 else { return nil }
+
+        func sample(_ plane: UnsafeRawPointer, _ index: Int) -> Float {
+            if isFloat {
+                return plane.load(fromByteOffset: index * 4, as: Float32.self)
+            } else if bits == 16 {
+                return Float(plane.load(fromByteOffset: index * 2, as: Int16.self)) / 32768.0
+            } else {
+                return Float(plane.load(fromByteOffset: index * 4, as: Int32.self)) / 2147483648.0
+            }
+        }
+
+        var out = [Int16]()
+        out.reserveCapacity(frameCount)
+        for frame in 0..<frameCount {
+            var acc: Float = 0
+            for plane in planes {
+                for c in 0..<plane.channels {
+                    acc += sample(plane.data, frame * plane.channels + c)
+                }
+            }
+            let v = max(-1.0, min(1.0, acc / Float(totalChannels)))
+            out.append(Int16(v * 32767.0))
+        }
+        return out
     }
 }
