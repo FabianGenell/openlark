@@ -379,17 +379,18 @@ def load_model(model_id: str) -> Any:
         _current_model = None
         release_unreferenced()
 
-    log(f"loading {spec.backend} model {spec.repo}")
+    source = model_source(spec)
+    log(f"loading {spec.backend} model {spec.repo} from {source}")
     t0 = time.perf_counter()
     if spec.backend == "parakeet":
         from parakeet_mlx import from_pretrained
-        _current_model = ("parakeet", from_pretrained(model_source(spec)))
+        _current_model = ("parakeet", from_pretrained(source))
     elif spec.backend == "whisper":
         # mlx-whisper transcribes via a top-level call that loads on demand.
         # The "model" we cache is just the repo string. mlx_whisper caches
         # the loaded weights internally per process.
         import mlx_whisper  # noqa: F401  (verify dep is present)
-        _current_model = ("whisper", model_source(spec))
+        _current_model = ("whisper", source)
     else:
         raise ValueError(f"unsupported backend: {spec.backend}")
 
@@ -617,10 +618,11 @@ def load_llm(model_id: str) -> Any:
         _current_llm = None
         release_unreferenced()
 
-    log(f"loading polish model {spec.repo}")
+    source = model_source(spec)
+    log(f"loading polish model {spec.repo} from {source}")
     t0 = time.perf_counter()
     from mlx_lm import load as load_lm
-    _current_llm = load_lm(model_source(spec))
+    _current_llm = load_lm(source)
     _current_llm_id = model_id
     log(f"loaded polish model {model_id} in {time.perf_counter() - t0:.2f}s")
     return _current_llm
