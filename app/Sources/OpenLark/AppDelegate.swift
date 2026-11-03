@@ -285,9 +285,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         micMenu.removeAllItems()
         let devices = AudioInputs.available()
         let selected = AudioInputs.selectedDeviceID
+        let systemDefaultTitle = AudioInputs.systemDefaultName()
+            .map { "System Default (\($0))" } ?? "System Default"
 
         let systemDefault = NSMenuItem(
-            title: "System Default",
+            title: systemDefaultTitle,
             action: #selector(selectMic(_:)),
             keyEquivalent: ""
         )
@@ -315,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Update the parent row title to show the currently-selected device,
         // so users see what's active without opening the submenu.
         let activeName = devices.first { $0.uniqueID == selected }?.name
-            ?? "System Default"
+            ?? systemDefaultTitle
         micMenuItem.title = "Microphone: \(activeName)"
     }
 

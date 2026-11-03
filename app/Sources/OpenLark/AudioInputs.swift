@@ -40,6 +40,11 @@ enum AudioInputs {
         UserDefaults.standard.set(id ?? "", forKey: selectedDeviceKey)
     }
 
+    /// Name of the input macOS currently treats as the default.
+    static func systemDefaultName() -> String? {
+        AVCaptureDevice.default(for: .audio)?.localizedName
+    }
+
     /// Resolved AVCaptureDevice. Uses the persisted id if present and the
     /// device is still connected, otherwise falls back to the system default.
     static func currentDevice() -> AVCaptureDevice? {
